@@ -1,0 +1,51 @@
+# Python
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/.Python
+backend/env/
+backend/venv/
+backend/.env
+backend/.venv
+backend/data/axolotl_images/
+backend/data/*.zip
+backend/data/train/
+backend/data/test/
+backend/data/axolotl_scraped/
+backend/data/Axolotl/
+backend/data/*.pth
+backend/data/diffusion_checkpoint.pth
+backend/data/diffusion_model_epoch*.pth
+backend/data/best_diffusion_model.pth
+backend/kaggle.json
+backend/generated_axolotls/
+
+# Virtual environments
+.env
+.venv
+venv/
+env/
+
+# Jupyter Notebook checkpoints
+backend/.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# Node
+frontend/node_modules/
+frontend/build/
+frontend/.env
+frontend/.DS_Store
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Misc
+*.swp
+*.swo

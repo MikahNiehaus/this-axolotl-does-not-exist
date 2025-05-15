@@ -11,6 +11,12 @@ from models.gan_modules import Generator, Discriminator
 from tqdm import tqdm
 import argparse
 
+print(f"[INFO] CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"[INFO] Using GPU: {torch.cuda.get_device_name(0)}")
+else:
+    print("[INFO] Using CPU")
+
 # --- CONFIG ---
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')

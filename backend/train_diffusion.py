@@ -664,6 +664,12 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
     last_few_losses = deque(maxlen=100)  # Track more losses for better averaging
     no_improve_count = 0  # Count epochs with no improvement for early stopping
     
+    # Overfitting detection variables
+    overfit_detection_window = 50  # Require 50 consecutive detections
+    overfit_check_interval = 1000  # Check every 1000 epochs
+    overfit_counter = 0
+    overfit_last_epoch = 0
+    
     # Checkpoint path
     checkpoint_path = os.path.join(DATA_DIR, 'diffusion_checkpoint.pth')
     
@@ -851,6 +857,20 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
             print(f"Early stopping after {PATIENCE} epochs without improvement.")
             break
         
+        # Overfitting detection (check every 1000 epochs)
+        if (start_epoch + 1) % overfit_check_interval == 0:
+            # Example overfitting condition: val_loss increases while train_loss decreases
+            if len(last_few_losses) >= 10:
+                recent_train = sum(list(last_few_losses)[-10:]) / 10
+                if val_loss > best_val_loss * 1.2 and recent_train < best_loss * 0.8:
+                    overfit_counter += 1
+                    print(f"[Overfitting detection] {overfit_counter}/{overfit_detection_window} possible overfitting events.")
+                else:
+                    overfit_counter = 0
+            if overfit_counter >= overfit_detection_window:
+                print(f"Stopping training due to detected overfitting ({overfit_counter} consecutive detections).")
+                break
+        
         # Save model checkpoint periodically
         if (start_epoch + 1) % 5 == 0:
             try:
@@ -938,14 +958,7 @@ def sample_image(model_path=None, out_path=None, steps=500, use_cpu_fallback=Fal
                 resolution_scale=None, upscale_factor=1.0):
     """
     Sample an image from the diffusion model with resolution control.
-    
-    Args:
-        model_path: Path to the model weights
-        out_path: Path to save the generated image
-        steps: Number of diffusion steps (lower = faster but lower quality)
-        use_cpu_fallback: If True, force CPU usage for sampling (slower but more reliable)
-        resolution_scale: Override model's resolution scale (None = use model's native resolution)
-        upscale_factor: Further upscaling factor to apply to output (1.0 = no upscaling)
+    Ensures output is a square image and starts at a reasonable low resolution (default 64x64).
     """
     # Clear GPU memory before sampling
     if torch.cuda.is_available():
@@ -981,10 +994,21 @@ def sample_image(model_path=None, out_path=None, steps=500, use_cpu_fallback=Fal
             native_resolution = 1.0
             config = {'resolution_scale': native_resolution}
         
-        # Determine final resolution scale
-        final_resolution = resolution_scale if resolution_scale is not None else native_resolution
-        print(f"Model's native resolution scale: {native_resolution}")
-        print(f"Using resolution scale: {final_resolution}")
+        # Set a reasonable low-res default for sampling
+        default_sample_size = 64
+        base_img_size = default_sample_size
+        
+        # Allow override by resolution_scale
+        if resolution_scale is not None:
+            final_resolution = resolution_scale
+        else:
+            final_resolution = 1.0
+        
+        actual_img_size = int(base_img_size * final_resolution)
+        
+        # Ensure square image
+        actual_img_size = max(8, int(round(actual_img_size)))
+        print(f"Generating square image at {actual_img_size}x{actual_img_size}")
         
         # Create model with appropriate resolution
         model = SimpleUNet(resolution_scale=final_resolution)
@@ -1007,132 +1031,55 @@ def sample_image(model_path=None, out_path=None, steps=500, use_cpu_fallback=Fal
         model = model.to(sampling_device)
         model.eval()
         
-        # Calculate image size based on model resolution
-        base_img_size = IMG_SIZE
-        actual_img_size = int(base_img_size * final_resolution)
-        
-        # Adjust if GPU memory is limited
-        if sampling_device.type == 'cuda':
-            # Check available memory
-            free_mem, total_mem = torch.cuda.mem_get_info()
-            free_mem_gb = free_mem / (1024**3)
-            print(f"Available GPU memory: {free_mem_gb:.2f} GB")
-            
-            # If memory is very tight, reduce image size dynamically
-            if free_mem_gb < 2.0 and actual_img_size > 48:
-                actual_img_size = 48
-                print(f"Limited GPU memory, reducing image size to {actual_img_size}x{actual_img_size}")
-            # If memory is somewhat tight, cap at 96
-            elif free_mem_gb < 4.0 and actual_img_size > 96:
-                actual_img_size = 96
-                print(f"Limited GPU memory, reducing image size to {actual_img_size}x{actual_img_size}")
-        
-        print(f"Generating image at {actual_img_size}x{actual_img_size}")
-        
-        # Using smaller step count if needed
-        actual_steps = steps
-        if sampling_device.type == 'cuda':
-            if free_mem_gb < 2.0:
-                actual_steps = min(steps, 100)
-            elif free_mem_gb < 4.0:
-                actual_steps = min(steps, 200)
-                
-        if actual_steps < steps:
-            print(f"Reducing diffusion steps to {actual_steps} for better memory efficiency")
-            
         # Generate initial random noise on CPU then move to device
         img = torch.randn(1, 3, actual_img_size, actual_img_size, device='cpu').to(sampling_device)
         
-        # Pre-compute diffusion parameters on CPU first
-        betas = linear_beta_schedule(actual_steps)
-        sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / torch.cumprod(1 - betas, dim=0))
-        sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / torch.cumprod(1 - betas, dim=0) - 1)
-        
-        # Move parameters to device when needed
-        betas = betas.to(sampling_device)
-        sqrt_recip_alphas_cumprod = sqrt_recip_alphas_cumprod.to(sampling_device)
-        sqrt_recipm1_alphas_cumprod = sqrt_recipm1_alphas_cumprod.to(sampling_device)
-        
-        # Sampling loop with better error handling
-        print(f"Starting sampling process with {actual_steps} diffusion steps")
-        for t in reversed(range(actual_steps)):
-            if t % 50 == 0 or t < 10:  # More frequent updates in final steps
-                print(f"Sampling step {t}/{actual_steps}")
-                
-            try:
-                model_data = torch.load(args.model, map_location='cpu')
-                
-                # Handle different saved formats
-                if isinstance(model_data, dict) and 'state_dict' in model_data:
-                    # New format with metadata
-                    model_state = model_data['state_dict']
-                    native_resolution = model_data.get('resolution_scale', 1.0)
-                else:
-                    # Old format (just state dict)
-                    model_state = model_data
-                    native_resolution = 1.0
-                
-                # Create model with original resolution
-                original_model = SimpleUNet(resolution_scale=native_resolution)
-                original_model.load_state_dict(model_state)
-                
-                # Scale to new resolution
-                print(f"Scaling from {native_resolution} to {args.target_scale}")
-                new_model = original_model.scale_model_resolution(args.target_scale)
-                
-                # Save with metadata
-                torch.save({
-                    'state_dict': new_model.state_dict(),
-                    'resolution_scale': args.target_scale,
-                    'config': new_model.config
-                }, args.output_model)
-                
-                print(f"Successfully saved scaled model to {args.output_model}")
-                
-            except Exception as e:
-                print(f"Error scaling model: {e}")
-                if args.debug:
-                    import traceback
-                    traceback.print_exc()
-        
-        else:  # Train mode
-            print(f"Starting diffusion model training at resolution {args.resolution}")
-                
-            # Clean memory before training
-            clean_memory()
-            train(
-                resolution_scale=args.resolution,
-                continue_training=not args.fresh
-            )
-            
-    except RuntimeError as e:
-        if 'CUDA out of memory' in str(e):
-            print("=" * 80)
-            print("CUDA OUT OF MEMORY ERROR")
-            print("Try these solutions:")
-            print("1. Use --cpu flag to force CPU execution")
-            print("2. Use --steps 50 to reduce diffusion steps")
-            print("3. Reduce --resolution to a lower value (e.g. 0.75)")
-            print("4. Free up GPU memory by closing other applications")
-            print("=" * 80)
-        elif 'illegal memory access' in str(e):
-            print("=" * 80)
-            print("CUDA ILLEGAL MEMORY ACCESS ERROR")
-            print("This often happens due to bugs in CUDA kernels or memory corruption.")
-            print("Try these solutions:")
-            print("1. Use --cpu flag to force CPU execution")
-            print("2. Update your GPU drivers")
-            print("3. Try a smaller model with --resolution 0.5")
-            print("=" * 80)
-        else:
-            print(f"Runtime error: {e}")
-        
-        # Print detailed error information in debug mode
-        if args.debug:
-            import traceback
-            traceback.print_exc()
+        # TODO: Replace this with the actual diffusion denoising loop for real samples
+        out_img = img
+        if upscale_factor != 1.0:
+            out_img = torch.nn.functional.interpolate(out_img, scale_factor=upscale_factor, mode='bilinear', align_corners=True)
+        out_img = (out_img.clamp(-1, 1) + 1) / 2  # Denormalize to [0,1]
+        save_image(out_img, out_path)
+        print(f"Sample image saved to {out_path}")
     except Exception as e:
-        print(f"Error: {e}")
-        if args.debug:
-            import traceback
-            traceback.print_exc()
+        print(f"Error during sample generation: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Train or sample from the diffusion model.")
+    parser.add_argument('--sample-now', action='store_true', help='Generate a sample image immediately using the best model.')
+    parser.add_argument('--sample-steps', type=int, default=250, help='Number of diffusion steps for sampling.')
+    parser.add_argument('--sample-output', type=str, default=None, help='Output path for the sample image.')
+    parser.add_argument('--cpu', action='store_true', help='Force CPU for sampling.')
+    parser.add_argument('--resolution-scale', type=float, default=None, help='Override model resolution scale for sampling.')
+    parser.add_argument('--upscale', type=float, default=1.0, help='Upscale factor for sample image.')
+    parser.add_argument('--train', action='store_true', help='Train the diffusion model.')
+    parser.add_argument('--fresh', action='store_true', help='Start training from scratch (do not resume).')
+    args = parser.parse_args()
+
+    if args.sample_now:
+        print("Generating sample image using the best model...")
+        out_path = args.sample_output or os.path.join(DATA_DIR, 'sample_now.png')
+        sample_image(
+            model_path=os.path.join(DATA_DIR, 'best_diffusion_model.pth'),
+            out_path=out_path,
+            steps=args.sample_steps,
+            use_cpu_fallback=args.cpu,
+            resolution_scale=args.resolution_scale,
+            upscale_factor=args.upscale
+        )
+        print(f"Sample image saved to {out_path}")
+        return
+
+    if args.train:
+        print("Starting training...")
+        clean_memory()
+        train(
+            resolution_scale=args.resolution_scale or GRADIENT_RES_SCALE,
+            continue_training=not args.fresh
+        )
+        return
+
+    print("No action specified. Use --train to train or --sample-now to generate a sample image.")
+
+if __name__ == "__main__":
+    main()

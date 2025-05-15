@@ -25,6 +25,12 @@ class AxolotlImageAPI:
         # Use the exact same GAN sample command from train_gan.py for best quality
         print("=== GENERATING IMAGE USING GAN MODEL NOT DIFFUSION ===")
         try:
+            try:
+                import numpy as np
+                print(f"[DEBUG] numpy version: {np.__version__}")
+            except Exception as e:
+                print(f"[ERROR] numpy import failed: {e}")
+                raise RuntimeError("Numpy is not available. Please check your environment and requirements.txt.")
             import torch
             import torch.nn as nn
             from torchvision.utils import save_image
@@ -50,9 +56,11 @@ class AxolotlImageAPI:
                     self.checkpointing_level = 0
                     
                 def load_checkpoint(self):
+                    print(f"[DEBUG] Looking for checkpoint at: {CHECKPOINT_PATH}")
                     if os.path.exists(CHECKPOINT_PATH):
                         try:
                             checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                            print(f"[DEBUG] Checkpoint loaded, keys: {list(checkpoint.keys())}")
                             
                             # Check if the checkpoint has a different image size (exact same code as train_gan.py)
                             saved_img_size = checkpoint.get('img_size', self.img_size)
@@ -74,8 +82,9 @@ class AxolotlImageAPI:
                             print(f"[INFO] Successfully loaded checkpoint from {CHECKPOINT_PATH}")
                         except Exception as e:
                             print(f"[WARN] Error loading checkpoint: {str(e)}")
+                            raise RuntimeError(f"Failed to load checkpoint: {str(e)}")
                     else:
-                        print("No checkpoint found, using untrained generator")
+                        print("[ERROR] No checkpoint found, using untrained generator. This will produce poor images.")
                 
                 def generate_sample(self):
                     """Generate a sample image using the exact same code as train_gan.py sample command"""
@@ -193,6 +202,7 @@ class AxolotlImageAPI:
             img_str = base64.b64encode(img_bytes).decode("utf-8")
             return img_str
         except Exception as e:
+            print(f"[ERROR] Exception in generate_single_image: {e}")
             # Fallback to Keras generator if PyTorch fails
             print(f"[ERROR] PyTorch GAN failed, falling back to Keras: {str(e)}")
             noise = np.random.normal(0, 1, (1, gan.input_shape[0]))

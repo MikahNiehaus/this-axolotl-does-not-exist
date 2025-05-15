@@ -1,0 +1,11 @@
+# Track binary model files with Git LFS 
+*.pth filter=lfs diff=lfs merge=lfs -text
+backend/data/gan_checkpoint.pth filter=lfs diff=lfs merge=lfs -text
+backend/data/best_diffusion_model.pth filter=lfs diff=lfs merge=lfs -text
+
+# Make sure these files are tracked even if they change
+backend/data/gan_checkpoint.pth -crlf
+backend/data/best_diffusion_model.pth -crlf
+
+# Ensure shell scripts use LF even on Windows
+*.sh text eol=lf

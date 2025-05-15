@@ -36,7 +36,8 @@ class AxolotlImageAPI:
             CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
             IMG_SIZE = 32  # Match the IMG_SIZE in train_gan.py
             Z_DIM = 100
-            DEVICE = torch.device('cpu')  # Force CPU for API inference
+            # Always use CPU for inference, even if CUDA is available
+            DEVICE = torch.device('cpu')
             
             # Create the GANTrainer instance exactly like train_gan.py
             class GANTrainer:

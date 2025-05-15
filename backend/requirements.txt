@@ -1,9 +1,11 @@
 Flask==2.0.1
 Werkzeug<2.1.0
 gunicorn==20.1.0
+--find-links https://download.pytorch.org/whl/torch_stable.html
 torch==2.2.2
 torchvision==0.17.2
-numpy>=1.19.0
+torchaudio==2.2.2
+numpy<2.0.0,>=1.19.0
 Pillow>=9.0.0
 requests>=2.25.0
 flask-cors>=3.0.10
@@ -21,4 +23,4 @@ einops>=0.4.1
 # Image processing
 opencv-python>=4.5.0
 albumentations>=1.0.0
-# Use the PyTorch CPU-only index URL for installation
+# CUDA support added for PyTorch with specific version constraints

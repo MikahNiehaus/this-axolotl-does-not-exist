@@ -124,41 +124,46 @@ class GitModelHandler:
     
     def update_model_in_git(self, epoch_num=None):
         """
-        Main method to update a model file in Git
-        
-        This method handles the full process: add, commit, and push
-        
+        Main method to update a model file in Git.
+
+        This method handles the full process: add, commit, and push.
+        It is designed to be called automatically during training to version model checkpoints.
+
         Args:
-            epoch_num: Optional epoch number to include in commit message
-        
+            epoch_num: Optional epoch number to include in commit message.
+
         Returns:
-            Boolean indicating success
+            Boolean indicating success.
+
+        Steps:
+            1. Rate limiting: Prevents too frequent pushes (default cooldown: 10s).
+            2. Checks if inside a git repository.
+            3. Prepares a commit message (optionally with epoch number).
+            4. Adds the model file to git staging.
+            5. Commits the model file (skips if no changes).
+            6. Pushes the commit to the remote branch.
+            7. Updates last push time if successful.
         """
         # Rate limiting to prevent too many pushes
         current_time = time.time()
         if current_time - self.last_push_time < self.cooldown_seconds:
             self.logger.info(f"Skipping push - cooldown period active ({self.cooldown_seconds}s)")
             return False
-            
+        # Check if in a git repository
         if not self._is_git_repo():
             self.logger.error("Not in a git repository")
             return False
-            
         # Prepare the commit message
         message = "Update model checkpoint"
         if epoch_num is not None:
             message += f" at epoch {epoch_num}"
-            
         # Add and commit
         if not self.add_model_file():
             return False
-            
         if not self.commit_model_file(message):
             return False
-            
         # Push the changes
         push_success = self.push_model_update()
         if push_success:
             self.last_push_time = current_time
-            
         return push_success

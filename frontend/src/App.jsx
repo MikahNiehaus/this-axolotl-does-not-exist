@@ -4,6 +4,10 @@ import viteLogo from '/vite.svg'
 import './App.css'
 import axolotlCute from './assets/axolotl-cute.png'; // Place a cute axolotl PNG in assets
 
+const API_BASE = import.meta.env.VITE_API_BASE;
+
+console.log('[Axolotl GAN Demo] Using API base URL:', API_BASE);
+
 function App() {
   const [count, setCount] = useState(0)
   const [image, setImage] = useState(null)
@@ -12,13 +16,20 @@ function App() {
 
   useEffect(() => {
     setLoading(true)
-    fetch('/generate')
+    console.log('[Axolotl GAN Demo] Fetching:', `${API_BASE}/generate`);
+    fetch(`${API_BASE}/generate`)
       .then(res => res.json())
       .then(data => {
-        setImage(`data:image/png;base64,${data.image}`)
+        console.log('[Axolotl GAN Demo] Backend response:', data);
+        const imgData = `data:image/png;base64,${data.image}`;
+        console.log('[Axolotl GAN Demo] Image data:', imgData);
+        setImage(imgData)
         setLoading(false)
       })
-      .catch(() => setLoading(false))
+      .catch((err) => {
+        console.error('[Axolotl GAN Demo] Fetch error:', err);
+        setLoading(false)
+      })
   }, [regen])
 
   return (

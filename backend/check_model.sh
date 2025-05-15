@@ -9,6 +9,17 @@ SAMPLE_DIR="$DATA_DIR/gan_samples"
 mkdir -p "$DATA_DIR"
 mkdir -p "$SAMPLE_DIR"
 
+# Record model hash for verification
+MODEL_HASH=""
+if [ -f "$CHECKPOINT_PATH" ]; then
+    if command -v md5sum > /dev/null 2>&1; then
+        MODEL_HASH=$(md5sum "$CHECKPOINT_PATH" | cut -d ' ' -f 1)
+    elif command -v md5 > /dev/null 2>&1; then
+        MODEL_HASH=$(md5 -q "$CHECKPOINT_PATH")
+    fi
+    echo "Model found with hash: $MODEL_HASH"
+fi
+
 # Check if the checkpoint file exists
 if [ ! -f "$CHECKPOINT_PATH" ]; then
     echo "GAN checkpoint not found. Setting up a dummy model for testing."

@@ -202,28 +202,58 @@ class GANTrainer:
         self.G.gradient_checkpointing_disable()
         self.D.gradient_checkpointing_disable()
         
-        # Save the checkpoint
-        torch.save({
-            'G': self.G.state_dict(),
-            'D': self.D.state_dict(),
-            'opt_G': self.opt_G.state_dict(),
-            'opt_D': self.opt_D.state_dict(),
-            'epoch': epoch
-        }, CHECKPOINT_PATH)
-        
-        # Push to Git every git_push_interval epochs
-        if self.git_enabled and (epoch + 1) % self.git_push_interval == 0:
-            print(f"[GIT] Pushing model checkpoint at epoch {epoch+1} to Git main branch...")
-            try:
-                self.git_handler.update_model_in_git(epoch_num=epoch+1)
-            except Exception as e:
-                print(f"[GIT] Warning: Failed to push model to Git: {str(e)}")
-                print("[GIT] Continuing training without Git push")
+        # Use a temporary checkpoint path to avoid corrupting the main checkpoint if saving fails
+        temp_checkpoint_path = CHECKPOINT_PATH + ".tmp"
+        try:
+            # Save the checkpoint to temporary file first
+            torch.save({
+                'G': self.G.state_dict(),
+                'D': self.D.state_dict(),
+                'opt_G': self.opt_G.state_dict(),
+                'opt_D': self.opt_D.state_dict(),
+                'epoch': epoch,
+                'img_size': self.img_size  # Store current image size for proper restoration
+            }, temp_checkpoint_path)
+            
+            # Rename temp file to actual checkpoint path (safer file operation)
+            if os.path.exists(temp_checkpoint_path):
+                import shutil
+                shutil.move(temp_checkpoint_path, CHECKPOINT_PATH)
+                
+            print(f"[Checkpoint] Saved checkpoint at epoch {epoch+1}")
+                
+            # Push to Git every git_push_interval epochs
+            if self.git_enabled and (epoch + 1) % self.git_push_interval == 0:
+                print(f"[GIT] Pushing model checkpoint at epoch {epoch+1} to Git main branch...")
+                try:
+                    self.git_handler.update_model_in_git(epoch_num=epoch+1)
+                except Exception as e:
+                    print(f"[GIT] Warning: Failed to push model to Git: {str(e)}")
+                    print("[GIT] Continuing training without Git push")
+        except Exception as e:
+            print(f"[ERROR] Failed to save checkpoint: {str(e)}")
+            if os.path.exists(temp_checkpoint_path):
+                os.remove(temp_checkpoint_path)
 
     def load_checkpoint(self):
         if os.path.exists(CHECKPOINT_PATH):
             try:
                 checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                
+                # Check if the checkpoint has a different image size 
+                saved_img_size = checkpoint.get('img_size', self.img_size)
+                if saved_img_size != self.img_size:
+                    print(f"[INFO] Checkpoint has image size {saved_img_size}, current is {self.img_size}")
+                    print(f"[INFO] Recreating models with saved image size {saved_img_size}")
+                    # Recreate models with correct size
+                    self.img_size = saved_img_size
+                    self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=saved_img_size).to(self.device)
+                    self.D = Discriminator(img_channels=3, img_size=saved_img_size).to(self.device)
+                    self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                    self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                    self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
+                
+                # Load state dictionaries
                 self.G.load_state_dict(checkpoint['G'])
                 self.D.load_state_dict(checkpoint['D'])
                 self.opt_G.load_state_dict(checkpoint['opt_G'])
@@ -235,13 +265,14 @@ class GANTrainer:
                 if hasattr(self.D, 'gradient_checkpointing_disable'):
                     self.D.gradient_checkpointing_disable()
                 
-                print(f"[INFO] Successfully loaded checkpoint from {CHECKPOINT_PATH}")
+                self.start_epoch = checkpoint['epoch'] + 1
+                print(f"[INFO] Successfully loaded checkpoint from {CHECKPOINT_PATH} at epoch {self.start_epoch}")
             except Exception as e:
                 print(f"[WARN] Error loading checkpoint: {str(e)}. Starting from scratch.")
-            self.start_epoch = checkpoint['epoch'] + 1
-            print(f"Resumed from checkpoint at epoch {self.start_epoch}")
+                self.start_epoch = 0
         else:
             print("No checkpoint found, starting fresh.")
+            self.start_epoch = 0
 
     def generate_sample(self, epoch):
         """Generate a sample using VRAM-safe approach"""

@@ -64,14 +64,12 @@ class AxolotlImageAPI:
                 def generate_sample(self):
                     """Generate a sample image with VRAM safety fallbacks"""
                     # Attempt in order: GPU with gradient checkpointing, GPU without checkpointing, CPU fallback
+                    print("[GAN] Generating image with PyTorch GAN model")
+                    
+                    # Try with GPU first with progressive fallbacks
                     try:
-                        # First try with GPU if available
+                        # First try with original model
                         self.G.eval()
-                        
-                        # Enable gradient checkpointing if available to reduce VRAM usage
-                        if hasattr(self.G, 'gradient_checkpointing_enable'):
-                            self.G.gradient_checkpointing_enable()
-                        
                         with torch.no_grad():
                             # Use the same fixed noise as in train_gan.py
                             fake = self.G(self.fixed_noise[:1]).detach().cpu()
@@ -79,24 +77,44 @@ class AxolotlImageAPI:
                             buffer = io.BytesIO()
                             save_image(fake, buffer, format="PNG", normalize=True)
                             buffer.seek(0)
+                            print("[GAN] Successfully generated image on GPU")
                             return buffer.getvalue()
                     except RuntimeError as e:
                         if 'CUDA out of memory' in str(e):
-                            # Try CPU fallback
-                            print("[VRAM] Out of GPU memory, falling back to CPU for inference")
+                            print("[VRAM] Out of memory, trying with gradient checkpointing...")
                             torch.cuda.empty_cache()
                             import gc
                             gc.collect()
                             
-                            # Move model to CPU and generate
-                            self.G = self.G.cpu()
-                            self.fixed_noise = self.fixed_noise.cpu()
-                            with torch.no_grad():
-                                fake = self.G(self.fixed_noise[:1]).detach()
-                                buffer = io.BytesIO()
-                                save_image(fake, buffer, format="PNG", normalize=True)
-                                buffer.seek(0)
-                                return buffer.getvalue()
+                            try:
+                                # Enable gradient checkpointing if available 
+                                if hasattr(self.G, 'gradient_checkpointing_enable'):
+                                    self.G.gradient_checkpointing_enable()
+                                    print("[VRAM] Gradient checkpointing enabled")
+                                
+                                with torch.no_grad():
+                                    fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                                    buffer = io.BytesIO()
+                                    save_image(fake, buffer, format="PNG", normalize=True)
+                                    buffer.seek(0)
+                                    print("[GAN] Successfully generated image with gradient checkpointing")
+                                    return buffer.getvalue()
+                            except RuntimeError:
+                                # Last resort - move to CPU
+                                print("[VRAM] Still out of memory, falling back to CPU...")
+                                torch.cuda.empty_cache()
+                                gc.collect()
+                                
+                                # Move model to CPU and generate
+                                self.G = self.G.cpu() 
+                                self.fixed_noise = self.fixed_noise.cpu()
+                                with torch.no_grad():
+                                    fake = self.G(self.fixed_noise[:1]).detach()
+                                    buffer = io.BytesIO()
+                                    save_image(fake, buffer, format="PNG", normalize=True)
+                                    buffer.seek(0)
+                                    print("[GAN] Successfully generated image on CPU")
+                                    return buffer.getvalue()
                         else:
                             # Re-raise other errors
                             raise

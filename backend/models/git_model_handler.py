@@ -24,7 +24,15 @@ class GitModelHandler:
             branch: Git branch to push to (default: 'main')
             remote: Git remote to push to (default: 'origin')
         """
-        self.model_path = os.path.abspath(model_path)
+        # Auto-detect correct model path
+        abs_path = os.path.abspath(model_path)
+        if not os.path.exists(abs_path):
+            # Try relative to backend dir if not found
+            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            alt_path = os.path.abspath(os.path.join(backend_dir, model_path))
+            if os.path.exists(alt_path):
+                abs_path = alt_path
+        self.model_path = abs_path
         self.branch = branch
         self.remote = remote
         self.last_push_time = 0

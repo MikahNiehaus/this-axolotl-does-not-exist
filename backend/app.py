@@ -36,7 +36,7 @@ class AxolotlImageAPI:
             CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
             IMG_SIZE = 32  # Match the IMG_SIZE in train_gan.py
             Z_DIM = 100
-            DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            DEVICE = torch.device('cpu')  # Force CPU for API inference
             
             # Create the GANTrainer instance exactly like train_gan.py
             class GANTrainer:
@@ -49,9 +49,9 @@ class AxolotlImageAPI:
                     
                 def load_checkpoint(self):
                     if os.path.exists(CHECKPOINT_PATH):
-                        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                        checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')  # Always load to CPU
                         self.G.load_state_dict(checkpoint['G'])
-                        print("Loaded checkpoint for generating sample")
+                        print("Loaded checkpoint for generating sample (CPU mode)")
                     else:
                         print("No checkpoint found, using untrained generator")
                 

@@ -6,7 +6,7 @@ import axolotlCute from './assets/axolotl-cute.png'; // Place a cute axolotl PNG
 
 // Dynamically set API base URL based on current hostname
 const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const API_BASE = isLocalhost ? 'http://192.168.1.160:5000' : import.meta.env.VITE_API_BASE || 'https://axolotl-ai-app.up.railway.app';
+const API_BASE = isLocalhost ? 'http://192.168.1.111:5000' : import.meta.env.VITE_API_BASE || 'https://axolotl-ai-app.up.railway.app';
 
 console.log('[Axolotl GAN Demo] Using API base URL:', API_BASE);
 

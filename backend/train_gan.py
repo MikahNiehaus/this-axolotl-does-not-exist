@@ -281,21 +281,18 @@ class GANTrainer:
             self.G.eval()
             if hasattr(self.G, 'gradient_checkpointing_disable'):
                 self.G.gradient_checkpointing_disable()
-                
-            # First try generating sample with GPU if available
+
+            # Generate single image first (smaller memory footprint)
             with torch.no_grad():
-                # Generate single image first (smaller memory footprint)
                 fake = self.G(self.fixed_noise[:1]).detach().cpu()
                 save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}.png'), normalize=True)
-                
-                # If single image succeeded, try generating a grid of samples
+
+                # Generate a grid of samples and overwrite the same file
                 try:
                     torch.cuda.empty_cache()  # Clear memory first
                     fake = self.G(self.fixed_noise).detach().cpu()
-                    save_image(fake, os.path.join(SAMPLE_DIR, f'sample_grid_epoch{epoch}.png'), 
-                              normalize=True, nrow=4)
+                    save_image(fake, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True, nrow=4)
                 except RuntimeError as e:
-                    # If grid generation fails due to memory, just continue with single sample
                     if 'CUDA out of memory' in str(e):
                         print("[VRAM] Grid sample generation skipped due to memory constraints")
                     else:
@@ -308,7 +305,7 @@ class GANTrainer:
                 self.G = self.G.cpu()
                 with torch.no_grad():
                     fake = self.G(self.fixed_noise[:1].cpu()).detach()
-                    save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}_cpu.png'), normalize=True)
+                    save_image(fake, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True)
                 self.G = self.G.to(self.device)
             except Exception as e2:
                 print(f"[CRITICAL] CPU fallback failed too: {str(e2)}")

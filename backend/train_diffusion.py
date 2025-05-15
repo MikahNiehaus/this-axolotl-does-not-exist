@@ -13,6 +13,8 @@ import gc  # For garbage collection
 import time  # For timestamping
 import argparse
 import traceback  # For detailed error reporting
+import subprocess
+import shutil
 
 # Enable CUDA error debugging (for misaligned address and memory issues)
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -45,26 +47,85 @@ def clean_memory():
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
-IMG_SIZE = 64  # Base image size, can be adjusted
+IMG_SIZE = 32  # Patch size for gradient step (VRAM safe for RTX 3060 laptop)
+FULL_RESOLUTION = 128  # Full image size for model output and sampling
 BATCH_SIZE = 32
-# EPOCHS removed: training is now infinite, controlled by patience only
 LEARNING_RATE = 2e-4
-RESOLUTION_SCALE = 4.0  # Max res of full image (user can change)
-GRADIENT_RES_SCALE = 0.5  # Resolution used for model/training (user can change)
+RESOLUTION_SCALE = FULL_RESOLUTION / IMG_SIZE  # e.g., 128/32 = 4.0
+GRADIENT_RES_SCALE = 1.0  # Always 1.0 since IMG_SIZE is patch size
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Set random seeds for reproducibility (but randomize each run)
+import random
+import numpy as np
+import time
+seed = int(time.time())
+random.seed(seed)
+torch.manual_seed(seed)
+np.random.seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+print(f"Random seed for this run: {seed}")
+
+# --- AUTO SPLIT TRAIN/TEST AT STARTUP ---
+def run_split_train_test(target_size):
+    """Run the split_train_test.py script to recreate train/test with the current resolution."""
+    split_script = os.path.join(os.path.dirname(__file__), 'split_train_test.py')
+    # Remove train and test directories if they exist
+    if os.path.exists(TRAIN_DIR):
+        shutil.rmtree(TRAIN_DIR)
+    if os.path.exists(TEST_DIR):
+        shutil.rmtree(TEST_DIR)
+    # Run the split script with the current patch size
+    subprocess.run([
+        sys.executable, split_script,
+        '--size', str(target_size),
+        '--train', TRAIN_DIR,
+        '--test', TEST_DIR
+    ], check=True)
+
+# Helper function to check if a directory is missing or empty
+def is_dir_missing_or_empty(path):
+    return not os.path.exists(path) or not os.listdir(path)
+
+# Only split if train or test is missing or empty
+if is_dir_missing_or_empty(TRAIN_DIR) or is_dir_missing_or_empty(TEST_DIR):
+    print("Train or test directory missing or empty, running split_train_test...")
+    run_split_train_test(FULL_RESOLUTION)
+else:
+    print("Train and test directories already exist and are populated. Skipping split.")
 
 # --- DATASET ---
 class AxolotlDataset(Dataset):
     def __init__(self, folder, transform=None):
-        self.files = glob.glob(os.path.join(folder, '*'))
+        self.folder = folder
         self.transform = transform
+        self.reload_files()
+    def reload_files(self):
+        self.files = glob.glob(os.path.join(self.folder, '*'))
     def __len__(self):
         return len(self.files)
     def __getitem__(self, idx):
-        img = Image.open(self.files[idx]).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        return img
+        # Robust to missing/corrupted files
+        try:
+            img = Image.open(self.files[idx]).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img
+        except Exception as e:
+            print(f"Warning: failed to load {self.files[idx]}: {e}")
+            # Remove the bad file from the list
+            del self.files[idx]
+            # If no files left, raise
+            if not self.files:
+                raise RuntimeError("No valid images left in dataset!")
+            # If too many files are missing, reload file list from disk
+            if len(self.files) < 10:
+                print("Reloading file list from disk due to too many missing files...")
+                self.reload_files()
+            # Clamp idx to valid range
+            idx = idx % len(self.files)
+            return self.__getitem__(idx)
 
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -366,20 +427,36 @@ def forward_diffusion_sample(x_0, t, betas):
               
     return noisy_x, noise
 
+def run_split_train_test(target_size):
+    """Run the split_train_test.py script to recreate train/test with the current resolution."""
+    split_script = os.path.join(os.path.dirname(__file__), 'split_train_test.py')
+    # Remove train and test directories if they exist
+    if os.path.exists(TRAIN_DIR):
+        import shutil
+        shutil.rmtree(TRAIN_DIR)
+    if os.path.exists(TEST_DIR):
+        import shutil
+        shutil.rmtree(TEST_DIR)
+    # Run the split script with the current patch size
+    subprocess.run([
+        sys.executable, split_script,
+        '--size', str(target_size),
+        '--train', TRAIN_DIR,
+        '--test', TEST_DIR
+    ], check=True)
+
 # --- TRAINING LOOP WITH PROGRESSIVE SCALING AND CHECKPOINTING ---
 def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
     """
-    Train the diffusion model at a fixed gradient checkpointing resolution.
+    Train the diffusion model using patch-wise (neural scaling) training.
     Args:
         resolution_scale: Patch size scale for model/training (default: GRADIENT_RES_SCALE)
         continue_training: Whether to continue from checkpoint
     """
-    # Always use full image size for sampling/generation
-    full_img_size = int(IMG_SIZE * RESOLUTION_SCALE)
-    patch_size = int(IMG_SIZE * resolution_scale)
-    print(f"Training with patch size: {patch_size}x{patch_size} (scale={resolution_scale}), full image size: {full_img_size}x{full_img_size} (scale={RESOLUTION_SCALE})")
+    full_img_size = FULL_RESOLUTION
+    patch_size = IMG_SIZE
+    print(f"Training with patch size: {patch_size}x{patch_size}, full image size: {full_img_size}x{full_img_size}")
     model = SimpleUNet(resolution_scale=RESOLUTION_SCALE).to(DEVICE)
-    # Enable gradient checkpointing for memory savings
     if hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -389,7 +466,7 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
     scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
     start_epoch = 0
     best_loss = float('inf')
-    patience = 100
+    patience = 10000
     patience_counter = 0
     last_few_losses = []
     checkpoint_path = os.path.join(DATA_DIR, 'diffusion_checkpoint.pth')
@@ -408,6 +485,8 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+    # Always run split before training to match patch size
+    run_split_train_test(IMG_SIZE)
     while True:
         model.train()
         running_loss = 0
@@ -417,14 +496,13 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
             retry_count = 0
             while retry_count < 3:
                 try:
-                    # Always resize images to full RESOLUTION_SCALE
-                    current_full_size = int(IMG_SIZE * RESOLUTION_SCALE)
-                    if imgs.shape[2] != current_full_size:
+                    # Always resize images to full resolution
+                    if imgs.shape[2] != full_img_size:
                         resized_imgs = []
                         for img in imgs:
                             resized = torch.nn.functional.interpolate(
                                 img.unsqueeze(0),
-                                size=(current_full_size, current_full_size),
+                                size=(full_img_size, full_img_size),
                                 mode='bilinear',
                                 align_corners=True
                             )
@@ -477,7 +555,7 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
                     batch_count += 1
                     if (batch_idx + 1) % 10 == 0:
                         print(f"Epoch {start_epoch+1} - Batch {batch_idx+1}/{len(train_loader)}, "
-                              f"Loss: {running_loss/batch_count:.4f}, Patch: {patch_size}, Full: {current_full_size}")
+                              f"Loss: {running_loss/batch_count:.4f}, Patch: {patch_size}, Full: {full_img_size}")
                         if DEVICE.type == 'cuda':
                             torch.cuda.empty_cache()
                     break
@@ -495,7 +573,7 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
                     print(f"Non-CUDA error on batch {batch_idx}: {e}")
                     raise
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {start_epoch+1} completed, Avg Loss: {avg_loss:.4f}, Patch: {patch_size}, Full: {current_full_size}")
+        print(f"Epoch {start_epoch+1} completed, Avg Loss: {avg_loss:.4f}, Patch: {patch_size}, Full: {full_img_size}")
         last_few_losses.append(avg_loss)
         if len(last_few_losses) > 10:
             last_few_losses.pop(0)
@@ -517,6 +595,19 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
             if patience_counter >= patience:
                 print(f"No improvement for {patience} epochs! Stopping training.")
                 break
+        # Generate a sample image every 1000 epochs
+        if (start_epoch+1) % 1000 == 0:
+            print(f"Generating sample image at epoch {start_epoch+1}...")
+            try:
+                sample_image(
+                    model_path=os.path.join(DATA_DIR, 'best_diffusion_model.pth'),
+                    out_path=os.path.join(DATA_DIR, f'sample_epoch{start_epoch+1}.png'),
+                    steps=250,
+                    resolution_scale=RESOLUTION_SCALE,
+                    upscale_factor=1.0
+                )
+            except Exception as e:
+                print(f"Failed to generate sample image: {e}")
         if (start_epoch+1) % 5 == 0:
             try:
                 torch.save({
@@ -776,6 +867,8 @@ if __name__ == '__main__':
                         help='Resolution scale factor for training (default: GRADIENT_RES_SCALE, e.g. 0.5). Use a higher value only if you have enough VRAM. For sampling/generation, use RESOLUTION_SCALE.')
     parser.add_argument('--fresh', action='store_true',
                         help='Start training from scratch (ignore checkpoints)')
+    parser.add_argument('--vram-friendly', action='store_true',
+                        help='Enable VRAM-friendly settings for RTX 3060 laptop (smaller patch size and full resolution). If not set, uses larger patch and full resolution for 4070 Super desktop.')
                         
     # Sampling arguments
     parser.add_argument('--output', type=str, default=None,
@@ -815,6 +908,19 @@ if __name__ == '__main__':
         
     print(f"Using device: {DEVICE}")
     
+    if args.vram_friendly:
+        # VRAM-friendly settings for RTX 3060 laptop
+        IMG_SIZE = 32
+        FULL_RESOLUTION = 128
+        print('Using VRAM-friendly settings: patch size 32, full resolution 128')
+    else:
+        # High-performance settings for 4070 Super desktop
+        IMG_SIZE = 64
+        FULL_RESOLUTION = 256
+        print('Using high-performance settings: patch size 64, full resolution 256')
+    RESOLUTION_SCALE = FULL_RESOLUTION / IMG_SIZE
+    GRADIENT_RES_SCALE = 1.0
+
     # Ensure data directories exist
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(TRAIN_DIR, exist_ok=True) 

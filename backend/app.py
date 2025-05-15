@@ -15,37 +15,61 @@ gan = AxolotlGenerator()
 class AxolotlImageAPI:
     @staticmethod
     def generate_single_image():
-        # Use the full GAN sample process: generate, post-process, and send the image as base64 (do not save to disk)
+        # Use the exact same GAN sample command from train_gan.py for best quality
         try:
             import torch
-            from torchvision.utils import make_grid
-            from models.gan_modules import Generator
+            import torch.nn as nn
+            from torchvision.utils import save_image
+            from models.gan_modules import Generator, Discriminator
             import numpy as np
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            checkpoint_path = os.path.join(os.path.dirname(__file__), 'data', 'gan_checkpoint.pth')
-            img_size = 128  # Use the highest size your GAN supports for best quality
-            z_dim = 100
-            G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
-            if os.path.exists(checkpoint_path):
-                checkpoint = torch.load(checkpoint_path, map_location=device)
-                G.load_state_dict(checkpoint['G'])
-            G.eval()
-            with torch.no_grad():
-                noise = torch.randn(1, z_dim, 1, 1, device=device)
-                fake = G(noise).detach().cpu()
-                # Post-process: denormalize and convert to numpy
-                img_tensor = fake[0]
-                img_tensor = (img_tensor + 1) / 2  # [-1,1] -> [0,1]
-                img_np = img_tensor.mul(255).clamp(0,255).byte().numpy()
-                img_np = np.transpose(img_np, (1,2,0))  # CHW to HWC
-                img = Image.fromarray(img_np)
-                buffered = io.BytesIO()
-                img.save(buffered, format="PNG")
-                img_bytes = buffered.getvalue()
+            
+            # Match the exact constants from train_gan.py
+            DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+            SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
+            CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
+            IMG_SIZE = 32  # Match the IMG_SIZE in train_gan.py
+            Z_DIM = 100
+            DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            # Create the GANTrainer instance exactly like train_gan.py
+            class GANTrainer:
+                def __init__(self, img_size, z_dim, device):
+                    self.img_size = img_size
+                    self.z_dim = z_dim
+                    self.device = device
+                    self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
+                    self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
+                    
+                def load_checkpoint(self):
+                    if os.path.exists(CHECKPOINT_PATH):
+                        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                        self.G.load_state_dict(checkpoint['G'])
+                        print("Loaded checkpoint for generating sample")
+                    else:
+                        print("No checkpoint found, using untrained generator")
+                
+                def generate_sample(self):
+                    self.G.eval()
+                    with torch.no_grad():
+                        # Use the same fixed noise as in train_gan.py
+                        fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                        # Save to memory buffer instead of disk
+                        buffer = io.BytesIO()
+                        save_image(fake, buffer, format="PNG", normalize=True)
+                        buffer.seek(0)
+                        return buffer.getvalue()
+            
+            # Create trainer and generate sample
+            trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)
+            trainer.load_checkpoint()
+            img_bytes = trainer.generate_sample()
+                
+            # Return the image as base64
             img_str = base64.b64encode(img_bytes).decode("utf-8")
             return img_str
         except Exception as e:
-            # fallback to Keras generator if torch fails
+            # Fallback to Keras generator if PyTorch fails
+            print(f"PyTorch GAN failed, falling back to Keras: {str(e)}")
             noise = np.random.normal(0, 1, (1, gan.input_shape[0]))
             img_arr = gan.generate_image(noise)
             if isinstance(img_arr, list) or len(img_arr.shape) == 4:

@@ -31,28 +31,24 @@ def is_duplicate(image_hash, existing_hashes):
     return image_hash in existing_hashes
 
 # Function to resize and validate an image
-def resize_and_validate(src_path):
-    """Resize image and make sure it's valid for training"""
+def resize_and_validate(src_path, crop_to_square=True):
+    """Validate image and optionally crop to square, but do NOT resize."""
     try:
         img = Image.open(src_path).convert('RGB')
-        
         # Check if image is too small or malformed
-        if min(img.size) < TARGET_SIZE[0] // 2:
+        if min(img.size) < 32:  # Arbitrary minimum size for sanity
             print(f"Skipping small image: {src_path}, size={img.size}")
             return None
-            
         # Crop to square if needed (center crop)
-        w, h = img.size
-        if w != h:
-            size = min(w, h)
-            left = (w - size) // 2
-            top = (h - size) // 2
-            right = left + size
-            bottom = top + size
-            img = img.crop((left, top, right, bottom))
-        
-        # Resize with high quality
-        img = img.resize(TARGET_SIZE, Image.LANCZOS)
+        if crop_to_square:
+            w, h = img.size
+            if w != h:
+                size = min(w, h)
+                left = (w - size) // 2
+                top = (h - size) // 2
+                right = left + size
+                bottom = top + size
+                img = img.crop((left, top, right, bottom))
         return img
     except Exception as e:
         print(f"Failed to process {src_path}: {e}")
@@ -60,9 +56,9 @@ def resize_and_validate(src_path):
 
 def main(source_dir=DATASET_DIR, train_dir=TRAIN_DIR, test_dir=TEST_DIR,
          target_size=TARGET_SIZE, test_split=TEST_SPLIT, augment=False):
-    """Process the images and split into train/test sets"""
+    """Process the images and split into train/test sets, preserving original quality."""
     print(f"Processing images from: {source_dir}")
-    print(f"Target size: {target_size}")
+    print(f"Images will be cropped to square but NOT resized. Original quality preserved.")
     
     # Make sure we have necessary directories
     os.makedirs(train_dir, exist_ok=True)
@@ -99,11 +95,11 @@ def main(source_dir=DATASET_DIR, train_dir=TRAIN_DIR, test_dir=TEST_DIR,
     # Process and copy train files
     train_count = 0
     for src_file in train_files:
-        img = resize_and_validate(src_file)
+        img = resize_and_validate(src_file, crop_to_square=True)
         if img is not None:
             timestamp = int(time.time() * 1000)
             filename = f"train_{train_count}_{timestamp}.jpg"
-            img.save(os.path.join(train_dir, filename))
+            img.save(os.path.join(train_dir, filename), quality=95)
             train_count += 1
             
             # Basic data augmentation if requested
@@ -111,28 +107,28 @@ def main(source_dir=DATASET_DIR, train_dir=TRAIN_DIR, test_dir=TEST_DIR,
                 # Flip horizontally
                 flipped = img.transpose(Image.FLIP_LEFT_RIGHT)
                 filename = f"train_aug_{train_count}_{timestamp}.jpg"
-                flipped.save(os.path.join(train_dir, filename))
+                flipped.save(os.path.join(train_dir, filename), quality=95)
                 train_count += 1
     
     # Process and copy test files
     test_count = 0
     for src_file in test_files:
-        img = resize_and_validate(src_file)
+        img = resize_and_validate(src_file, crop_to_square=True)
         if img is not None:
             timestamp = int(time.time() * 1000)
             filename = f"test_{test_count}_{timestamp}.jpg"
-            img.save(os.path.join(test_dir, filename))
+            img.save(os.path.join(test_dir, filename), quality=95)
             test_count += 1
     
     print(f"Successfully processed {train_count} training images and {test_count} test images")
-    print(f"All images resized to {target_size}")
+    print(f"All images cropped to square, original resolution preserved.")
     
     return train_count, test_count
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process and split axolotl dataset')
     parser.add_argument('--size', type=int, default=64, 
-                      help='Target image size (square dimensions)')
+                      help='(Ignored) Kept for compatibility. Images are NOT resized, only cropped to square.')
     parser.add_argument('--source', type=str, default=DATASET_DIR,
                       help='Source directory containing images')
     parser.add_argument('--train', type=str, default=TRAIN_DIR,
@@ -151,7 +147,7 @@ if __name__ == "__main__":
         source_dir=args.source,
         train_dir=args.train,
         test_dir=args.test,
-        target_size=(args.size, args.size),
+        target_size=(args.size, args.size),  # Kept for compatibility, not used
         test_split=args.split,
         augment=args.augment
     )

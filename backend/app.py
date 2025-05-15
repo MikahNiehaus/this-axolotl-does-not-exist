@@ -4,12 +4,7 @@ import base64
 from models.generator import AxolotlGenerator
 import numpy as np
 from PIL import Image
-f@app.route('/generate', methods=['GET'])
-def generate_image():
-    # Clear indicator that we're using the GAN for image generation
-    print("Generating image with GAN model (not diffusion)")
-    img_str = AxolotlImageAPI.generate_single_image()
-    return jsonify({'image': img_str, 'model_type': 'GAN'})flask_cors import CORS
+from flask_cors import CORS
 import os
 import time
 
@@ -28,7 +23,6 @@ class AxolotlImageAPI:
     @staticmethod
     def generate_single_image():
         # Use the exact same GAN sample command from train_gan.py for best quality
-        print("=== GENERATING IMAGE USING GAN MODEL NOT DIFFUSION ===")
         try:
             import torch
             import torch.nn as nn
@@ -64,12 +58,14 @@ class AxolotlImageAPI:
                 def generate_sample(self):
                     """Generate a sample image with VRAM safety fallbacks"""
                     # Attempt in order: GPU with gradient checkpointing, GPU without checkpointing, CPU fallback
-                    print("[GAN] Generating image with PyTorch GAN model")
-                    
-                    # Try with GPU first with progressive fallbacks
                     try:
-                        # First try with original model
+                        # First try with GPU if available
                         self.G.eval()
+                        
+                        # Enable gradient checkpointing if available to reduce VRAM usage
+                        if hasattr(self.G, 'gradient_checkpointing_enable'):
+                            self.G.gradient_checkpointing_enable()
+                        
                         with torch.no_grad():
                             # Use the same fixed noise as in train_gan.py
                             fake = self.G(self.fixed_noise[:1]).detach().cpu()
@@ -77,44 +73,24 @@ class AxolotlImageAPI:
                             buffer = io.BytesIO()
                             save_image(fake, buffer, format="PNG", normalize=True)
                             buffer.seek(0)
-                            print("[GAN] Successfully generated image on GPU")
                             return buffer.getvalue()
                     except RuntimeError as e:
                         if 'CUDA out of memory' in str(e):
-                            print("[VRAM] Out of memory, trying with gradient checkpointing...")
+                            # Try CPU fallback
+                            print("[VRAM] Out of GPU memory, falling back to CPU for inference")
                             torch.cuda.empty_cache()
                             import gc
                             gc.collect()
                             
-                            try:
-                                # Enable gradient checkpointing if available 
-                                if hasattr(self.G, 'gradient_checkpointing_enable'):
-                                    self.G.gradient_checkpointing_enable()
-                                    print("[VRAM] Gradient checkpointing enabled")
-                                
-                                with torch.no_grad():
-                                    fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                                    buffer = io.BytesIO()
-                                    save_image(fake, buffer, format="PNG", normalize=True)
-                                    buffer.seek(0)
-                                    print("[GAN] Successfully generated image with gradient checkpointing")
-                                    return buffer.getvalue()
-                            except RuntimeError:
-                                # Last resort - move to CPU
-                                print("[VRAM] Still out of memory, falling back to CPU...")
-                                torch.cuda.empty_cache()
-                                gc.collect()
-                                
-                                # Move model to CPU and generate
-                                self.G = self.G.cpu() 
-                                self.fixed_noise = self.fixed_noise.cpu()
-                                with torch.no_grad():
-                                    fake = self.G(self.fixed_noise[:1]).detach()
-                                    buffer = io.BytesIO()
-                                    save_image(fake, buffer, format="PNG", normalize=True)
-                                    buffer.seek(0)
-                                    print("[GAN] Successfully generated image on CPU")
-                                    return buffer.getvalue()
+                            # Move model to CPU and generate
+                            self.G = self.G.cpu()
+                            self.fixed_noise = self.fixed_noise.cpu()
+                            with torch.no_grad():
+                                fake = self.G(self.fixed_noise[:1]).detach()
+                                buffer = io.BytesIO()
+                                save_image(fake, buffer, format="PNG", normalize=True)
+                                buffer.seek(0)
+                                return buffer.getvalue()
                         else:
                             # Re-raise other errors
                             raise
@@ -180,13 +156,8 @@ def health_check():
 
 @app.route('/generate', methods=['GET'])
 def generate_image():
-    # Clear indicator that we're using the GAN for image generation
-    print("Generating image with GAN model (not diffusion)")
     img_b64 = AxolotlImageAPI.generate_single_image()
-    return jsonify({
-        'image': img_b64,
-        'model_type': 'GAN'  # Explicitly indicate we're using GAN not diffusion
-    })
+    return jsonify({'image': img_b64})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

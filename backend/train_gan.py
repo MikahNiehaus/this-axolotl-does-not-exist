@@ -42,6 +42,11 @@ class AxolotlDataset(Dataset):
 
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomVerticalFlip(),
+    transforms.RandomRotation(20),
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
     transforms.ToTensor(),
     transforms.Normalize([0.5]*3, [0.5]*3)
 ])
@@ -172,6 +177,11 @@ class GANTrainer:
                         global transform, train_ds
                         transform = transforms.Compose([
                             transforms.Resize((self.img_size, self.img_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomVerticalFlip(),
+                            transforms.RandomRotation(20),
+                            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+                            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
                             transforms.ToTensor(),
                             transforms.Normalize([0.5]*3, [0.5]*3)
                         ])

@@ -90,10 +90,12 @@ class GANTrainer:
         if self.git_enabled:
             try:
                 self.git_handler = GitModelHandler(CHECKPOINT_PATH)
-                print("[GIT] Git integration enabled - Model will be pushed to main branch every 1000 epochs")
+                print(f"[GIT] Git integration enabled - Model will be pushed to main branch every {self.git_push_interval} epochs")
             except Exception as e:
                 print(f"[GIT] Warning: Could not initialize Git handler: {str(e)}")
                 self.git_enabled = False
+        else:
+            print("[GIT] Git integration disabled - Git not available or not in a Git repository")
         
     def _check_git_available(self):
         """Check if Git is available and we're in a Git repository"""
@@ -126,16 +128,50 @@ class GANTrainer:
         return True
 
     def enable_gradient_checkpointing(self):
-        # Try to enable gradient checkpointing if supported
-        if hasattr(self.G, 'gradient_checkpointing_enable'):
+        """Enable gradient checkpointing to save VRAM memory at the cost of computation speed"""
+        try:
+            # Import needed for gradient checkpointing
+            import torch.utils.checkpoint
+            
+            # Enable checkpointing on Generator
             self.G.gradient_checkpointing_enable()
             print(f"[VRAM] Enabled gradient checkpointing on Generator (level {self.checkpointing_level})")
-        if hasattr(self.D, 'gradient_checkpointing_enable'):
+            
+            # Enable checkpointing on Discriminator  
             self.D.gradient_checkpointing_enable()
             print(f"[VRAM] Enabled gradient checkpointing on Discriminator (level {self.checkpointing_level})")
+            
+            # Additional memory saving measures based on checkpoint level
+            if self.checkpointing_level >= 2:
+                # Reduce batch size
+                global BATCH_SIZE
+                new_batch_size = max(4, BATCH_SIZE // 2)
+                if new_batch_size != BATCH_SIZE:
+                    print(f"[VRAM] Reducing batch size from {BATCH_SIZE} to {new_batch_size}")
+                    BATCH_SIZE = new_batch_size
+                    
+            if self.checkpointing_level >= 3:
+                # Use mixed precision training if available
+                try:
+                    from torch.cuda.amp import autocast, GradScaler
+                    self.use_amp = True
+                    self.scaler = GradScaler()
+                    print("[VRAM] Enabled mixed precision training")
+                except ImportError:
+                    print("[VRAM] Mixed precision training not available")
+                    
+            return True
+        except Exception as e:
+            print(f"[VRAM] Error enabling gradient checkpointing: {str(e)}")
+            return False
 
     def save_checkpoint(self, epoch):
         """Save model checkpoint and push to Git at specified intervals"""
+        # Get clean model states first
+        self.G.gradient_checkpointing_disable()
+        self.D.gradient_checkpointing_disable()
+        
+        # Save the checkpoint
         torch.save({
             'G': self.G.state_dict(),
             'D': self.D.state_dict(),
@@ -155,22 +191,71 @@ class GANTrainer:
 
     def load_checkpoint(self):
         if os.path.exists(CHECKPOINT_PATH):
-            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
-            self.G.load_state_dict(checkpoint['G'])
-            self.D.load_state_dict(checkpoint['D'])
-            self.opt_G.load_state_dict(checkpoint['opt_G'])
-            self.opt_D.load_state_dict(checkpoint['opt_D'])
+            try:
+                checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                self.G.load_state_dict(checkpoint['G'])
+                self.D.load_state_dict(checkpoint['D'])
+                self.opt_G.load_state_dict(checkpoint['opt_G'])
+                self.opt_D.load_state_dict(checkpoint['opt_D'])
+                
+                # Make sure gradient checkpointing is disabled for loaded models initially
+                if hasattr(self.G, 'gradient_checkpointing_disable'):
+                    self.G.gradient_checkpointing_disable()
+                if hasattr(self.D, 'gradient_checkpointing_disable'):
+                    self.D.gradient_checkpointing_disable()
+                
+                print(f"[INFO] Successfully loaded checkpoint from {CHECKPOINT_PATH}")
+            except Exception as e:
+                print(f"[WARN] Error loading checkpoint: {str(e)}. Starting from scratch.")
             self.start_epoch = checkpoint['epoch'] + 1
             print(f"Resumed from checkpoint at epoch {self.start_epoch}")
         else:
             print("No checkpoint found, starting fresh.")
 
     def generate_sample(self, epoch):
-        self.G.eval()
-        with torch.no_grad():
-            fake = self.G(self.fixed_noise[:1]).detach().cpu()  # Only generate one image
-            save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}.png'), normalize=True)
-        self.G.train()
+        """Generate a sample using VRAM-safe approach"""
+        try:
+            # Set eval mode and disable checkpointing to ensure clean output
+            self.G.eval()
+            if hasattr(self.G, 'gradient_checkpointing_disable'):
+                self.G.gradient_checkpointing_disable()
+                
+            # First try generating sample with GPU if available
+            with torch.no_grad():
+                # Generate single image first (smaller memory footprint)
+                fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}.png'), normalize=True)
+                
+                # If single image succeeded, try generating a grid of samples
+                try:
+                    torch.cuda.empty_cache()  # Clear memory first
+                    fake = self.G(self.fixed_noise).detach().cpu()
+                    save_image(fake, os.path.join(SAMPLE_DIR, f'sample_grid_epoch{epoch}.png'), 
+                              normalize=True, nrow=4)
+                except RuntimeError as e:
+                    # If grid generation fails due to memory, just continue with single sample
+                    if 'CUDA out of memory' in str(e):
+                        print("[VRAM] Grid sample generation skipped due to memory constraints")
+                    else:
+                        print(f"[ERROR] Grid sample generation error: {str(e)}")
+        except Exception as e:
+            print(f"[ERROR] Sample generation failed: {str(e)}")
+            # Fall back to CPU if necessary
+            try:
+                print("[VRAM] Attempting to generate sample on CPU...")
+                self.G = self.G.cpu()
+                with torch.no_grad():
+                    fake = self.G(self.fixed_noise[:1].cpu()).detach()
+                    save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}_cpu.png'), normalize=True)
+                self.G = self.G.to(self.device)
+            except Exception as e2:
+                print(f"[CRITICAL] CPU fallback failed too: {str(e2)}")
+        finally:
+            # Restore model to training state
+            self.G.train()
+            # Re-enable gradient checkpointing if it was active
+            if hasattr(self, 'checkpointing_level') and self.checkpointing_level > 0:
+                self.enable_gradient_checkpointing()
 
     def train(self, train_loader, epochs=10000, sample_interval=1000):
         local_train_loader = train_loader
@@ -185,23 +270,50 @@ class GANTrainer:
                 D_losses = []
                 G_losses = []
                 pbar = tqdm(local_train_loader, desc=f"Epoch {epoch+1}", leave=False)
+                
+                # Setup mixed precision if enabled by VRAM optimization
+                use_amp = hasattr(self, 'use_amp') and self.use_amp
+                
                 for real in pbar:
                     real = real.to(self.device)
                     batch_size = real.size(0)
                     noise = torch.randn(batch_size, self.z_dim, 1, 1, device=self.device)
-                    fake = self.G(noise)
-                    D_real = self.D(real).view(-1)
-                    D_fake = self.D(fake.detach()).view(-1)
-                    loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
-                             self.criterion(D_fake, torch.zeros_like(D_fake))
+                    
+                    # Train Discriminator with optional mixed precision
                     self.opt_D.zero_grad()
-                    loss_D.backward()
-                    self.opt_D.step()
-                    output = self.D(fake).view(-1)
-                    loss_G = self.criterion(output, torch.ones_like(output))
+                    if use_amp:
+                        with torch.cuda.amp.autocast():
+                            fake = self.G(noise)
+                            D_real = self.D(real).view(-1)
+                            D_fake = self.D(fake.detach()).view(-1)
+                            loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
+                                    self.criterion(D_fake, torch.zeros_like(D_fake))
+                        self.scaler.scale(loss_D).backward()
+                        self.scaler.step(self.opt_D)
+                    else:
+                        fake = self.G(noise)
+                        D_real = self.D(real).view(-1)
+                        D_fake = self.D(fake.detach()).view(-1)
+                        loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
+                                self.criterion(D_fake, torch.zeros_like(D_fake))
+                        loss_D.backward()
+                        self.opt_D.step()
+                    
+                    # Train Generator with optional mixed precision
                     self.opt_G.zero_grad()
-                    loss_G.backward()
-                    self.opt_G.step()
+                    if use_amp:
+                        with torch.cuda.amp.autocast():
+                            output = self.D(fake).view(-1)
+                            loss_G = self.criterion(output, torch.ones_like(output))
+                        self.scaler.scale(loss_G).backward()
+                        self.scaler.step(self.opt_G)
+                        self.scaler.update()
+                    else:
+                        output = self.D(fake).view(-1)
+                        loss_G = self.criterion(output, torch.ones_like(output))
+                        loss_G.backward()
+                        self.opt_G.step()
+                    
                     D_losses.append(loss_D.item())
                     G_losses.append(loss_G.item())
                     pbar.set_postfix({"D_loss": loss_D.item(), "G_loss": loss_G.item()})
@@ -279,7 +391,27 @@ if __name__ == '__main__':
     if args.command == 'sample':
         print("Generating a full image sample using the current generator...")
         trainer.load_checkpoint()
-        trainer.generate_sample('manual')
-        print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual.png')}")
+        
+        # Make multiple attempts to generate samples with increasing VRAM optimization if needed
+        try:
+            trainer.generate_sample('manual')
+            print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual.png')}")
+        except RuntimeError as e:
+            if 'CUDA out of memory' in str(e):
+                print("[VRAM] CUDA out of memory detected. Attempting with gradient checkpointing...")
+                trainer.checkpointing_level = 1
+                trainer.enable_gradient_checkpointing()
+                try:
+                    trainer.generate_sample('manual')
+                    print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual.png')}")
+                except Exception as e2:
+                    print(f"[ERROR] Failed to generate sample even with checkpointing: {str(e2)}")
+                    print("[VRAM] Falling back to CPU generation...")
+                    trainer.G = trainer.G.cpu()
+                    trainer.fixed_noise = trainer.fixed_noise.cpu()
+                    trainer.generate_sample('manual_cpu')
+                    print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual_cpu.png')}")
+            else:
+                print(f"[ERROR] Failed to generate sample: {str(e)}")
     else:
         trainer.train(train_loader, epochs=EPOCHS, sample_interval=SAMPLE_INTERVAL)

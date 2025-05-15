@@ -56,15 +56,44 @@ class AxolotlImageAPI:
                         print("No checkpoint found, using untrained generator")
                 
                 def generate_sample(self):
-                    self.G.eval()
-                    with torch.no_grad():
-                        # Use the same fixed noise as in train_gan.py
-                        fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                        # Save to memory buffer instead of disk
-                        buffer = io.BytesIO()
-                        save_image(fake, buffer, format="PNG", normalize=True)
-                        buffer.seek(0)
-                        return buffer.getvalue()
+                    """Generate a sample image with VRAM safety fallbacks"""
+                    # Attempt in order: GPU with gradient checkpointing, GPU without checkpointing, CPU fallback
+                    try:
+                        # First try with GPU if available
+                        self.G.eval()
+                        
+                        # Enable gradient checkpointing if available to reduce VRAM usage
+                        if hasattr(self.G, 'gradient_checkpointing_enable'):
+                            self.G.gradient_checkpointing_enable()
+                        
+                        with torch.no_grad():
+                            # Use the same fixed noise as in train_gan.py
+                            fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                            # Save to memory buffer instead of disk
+                            buffer = io.BytesIO()
+                            save_image(fake, buffer, format="PNG", normalize=True)
+                            buffer.seek(0)
+                            return buffer.getvalue()
+                    except RuntimeError as e:
+                        if 'CUDA out of memory' in str(e):
+                            # Try CPU fallback
+                            print("[VRAM] Out of GPU memory, falling back to CPU for inference")
+                            torch.cuda.empty_cache()
+                            import gc
+                            gc.collect()
+                            
+                            # Move model to CPU and generate
+                            self.G = self.G.cpu()
+                            self.fixed_noise = self.fixed_noise.cpu()
+                            with torch.no_grad():
+                                fake = self.G(self.fixed_noise[:1]).detach()
+                                buffer = io.BytesIO()
+                                save_image(fake, buffer, format="PNG", normalize=True)
+                                buffer.seek(0)
+                                return buffer.getvalue()
+                        else:
+                            # Re-raise other errors
+                            raise
             
             # Create trainer and generate sample
             trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)

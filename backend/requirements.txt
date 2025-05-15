@@ -16,3 +16,8 @@ scikit-learn>=0.24.0
 matplotlib>=3.3.0
 # Memory optimization
 psutil>=5.8.0
+# Gradient checkpointing support
+einops>=0.4.1
+# Image processing
+opencv-python>=4.5.0
+albumentations>=1.0.0

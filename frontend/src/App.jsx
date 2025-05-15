@@ -4,7 +4,9 @@ import viteLogo from '/vite.svg'
 import './App.css'
 import axolotlCute from './assets/axolotl-cute.png'; // Place a cute axolotl PNG in assets
 
-const API_BASE = import.meta.env.VITE_API_BASE;
+// Dynamically set API base URL based on current hostname
+const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const API_BASE = isLocalhost ? 'http://localhost:5000' : import.meta.env.VITE_API_BASE || 'https://axolotl-ai-app.up.railway.app';
 
 console.log('[Axolotl GAN Demo] Using API base URL:', API_BASE);
 
@@ -13,38 +15,57 @@ function App() {
   const [image, setImage] = useState(null)
   const [loading, setLoading] = useState(true)
   const [regen, setRegen] = useState(0)
-
-  useEffect(() => {
+  const [modelType, setModelType] = useState('GAN') // Default to GAN
+    useEffect(() => {
     setLoading(true)
     console.log('[Axolotl GAN Demo] Fetching:', `${API_BASE}/generate`);
+    
     fetch(`${API_BASE}/generate`)
       .then(res => res.json())
       .then(data => {
         console.log('[Axolotl GAN Demo] Backend response:', data);
         const imgData = `data:image/png;base64,${data.image}`;
         console.log('[Axolotl GAN Demo] Image data:', imgData);
-        setImage(imgData)
-        setLoading(false)
+        
+        // Always use model_type from API if available, fall back to default value
+        if (data.model_type) {
+          setModelType(data.model_type);
+          console.log(`[Axolotl Demo] Using model type from API: ${data.model_type}`);
+        } else {
+          console.log(`[Axolotl Demo] Using default model type: ${modelType}`);
+        }
+        
+        setImage(imgData);
+        setLoading(false);
       })
       .catch((err) => {
         console.error('[Axolotl GAN Demo] Fetch error:', err);
-        setLoading(false)
+        setLoading(false);
       })
   }, [regen])
 
   return (
     <>
-      <h1>Axolotl GAN Demo</h1>
+      <h1>Axolotl {modelType} Generator</h1>
       {loading ? (
         <div style={{marginTop: 40}}>
           <img src={axolotlCute} alt="Axolotl Loading" style={{width: 120, animation: 'axolotl-bounce 1.2s infinite'}} />
           <div style={{fontSize: 22, marginTop: 16, color: '#b48be4', fontWeight: 'bold'}}>
             Generating a new axolotl for you...
           </div>
-        </div>
-      ) : (
+        </div>      ) : (
         image && (
           <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 32}}>
+            <div style={{
+              background: '#724b9b',
+              color: 'white',
+              padding: '4px 12px',
+              borderRadius: '12px',
+              fontWeight: 'bold',
+              marginBottom: '8px'
+            }}>
+              Generated with {modelType} Model
+            </div>
             <img
               src={image}
               alt="Generated Axolotl"

@@ -1,10 +1,10 @@
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, send_file, request
 import io
 import base64
 from models.generator import AxolotlGenerator
 import numpy as np
 from PIL import Image
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import os
 import time
 
@@ -222,15 +222,20 @@ def health_check():
         'timestamp': str(time.time())
     })
 
-@app.route('/generate', methods=['GET'])
+@app.route('/generate', methods=['GET', 'OPTIONS'])
+@cross_origin()
 def generate_image():
     # Clear indicator that we're using the GAN for image generation
     print("Generating image with GAN model (not diffusion)")
-    img_b64 = AxolotlImageAPI.generate_single_image()
-    return jsonify({
-        'image': img_b64,
-        'model_type': 'GAN'  # Explicitly indicate we're using GAN not diffusion
-    })
+    try:
+        img_b64 = AxolotlImageAPI.generate_single_image()
+        return jsonify({
+            'image': img_b64,
+            'model_type': 'GAN'  # Explicitly indicate we're using GAN not diffusion
+        })
+    except Exception as e:
+        print(f"[ERROR] /generate endpoint failed: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

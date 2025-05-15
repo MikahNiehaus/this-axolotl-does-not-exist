@@ -6,9 +6,16 @@ import numpy as np
 from PIL import Image
 from flask_cors import CORS
 import os
+import time
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Ensure directories exist
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(SAMPLE_DIR, exist_ok=True)
 
 gan = AxolotlGenerator()
 
@@ -90,10 +97,18 @@ class AxolotlImageAPI:
             img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
             return img_str
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'ok',
+        'timestamp': str(time.time())
+    })
+
 @app.route('/generate', methods=['GET'])
 def generate_image():
     img_b64 = AxolotlImageAPI.generate_single_image()
     return jsonify({'image': img_b64})
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)

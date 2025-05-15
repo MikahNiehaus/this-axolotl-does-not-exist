@@ -4,7 +4,9 @@ import viteLogo from '/vite.svg'
 import './App.css'
 import axolotlCute from './assets/axolotl-cute.png'; // Place a cute axolotl PNG in assets
 
-const API_BASE = import.meta.env.VITE_API_BASE || '';
+const API_BASE = import.meta.env.VITE_API_BASE;
+
+console.log('[Axolotl GAN Demo] Using API base URL:', API_BASE);
 
 function App() {
   const [count, setCount] = useState(0)
@@ -14,6 +16,7 @@ function App() {
 
   useEffect(() => {
     setLoading(true)
+    console.log('[Axolotl GAN Demo] Fetching:', `https://this-axolotl-does-not-exist-production.up.railway.app/generate`);
     fetch(`${API_BASE}/generate`)
       .then(res => res.json())
       .then(data => {

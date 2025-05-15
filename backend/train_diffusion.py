@@ -47,9 +47,10 @@ TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
 IMG_SIZE = 64  # Base image size, can be adjusted
 BATCH_SIZE = 32
-EPOCHS = 1000
+# EPOCHS removed: training is now infinite, controlled by patience only
 LEARNING_RATE = 2e-4
-RESOLUTION_SCALE = 1.0  # Resolution scaling factor, can be increased later
+RESOLUTION_SCALE = 4.0  # Max res of full image (user can change)
+GRADIENT_RES_SCALE = 0.5  # Resolution used for model/training (user can change)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # --- DATASET ---
@@ -354,225 +355,157 @@ def linear_beta_schedule(timesteps):
     return torch.linspace(1e-4, 0.02, timesteps)
 
 def forward_diffusion_sample(x_0, t, betas):
-    noise = torch.randn_like(x_0)
+    # Ensure noise has exactly the same shape as x_0
+    noise = torch.randn(x_0.shape, device=x_0.device)
     sqrt_alphas_cumprod = torch.sqrt(torch.cumprod(1 - betas, dim=0))
     sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - torch.cumprod(1 - betas, dim=0))
-    return sqrt_alphas_cumprod[t][:, None, None, None] * x_0 + \
-           sqrt_one_minus_alphas_cumprod[t][:, None, None, None] * noise, noise
+    
+    # Generate noisy image
+    noisy_x = sqrt_alphas_cumprod[t][:, None, None, None] * x_0 + \
+              sqrt_one_minus_alphas_cumprod[t][:, None, None, None] * noise
+              
+    return noisy_x, noise
 
 # --- TRAINING LOOP WITH PROGRESSIVE SCALING AND CHECKPOINTING ---
-def train(resolution_scale=RESOLUTION_SCALE, continue_training=True, progressive_training=True):
+def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
     """
-    Train the diffusion model with progressive scaling support
-    
+    Train the diffusion model at a fixed gradient checkpointing resolution.
     Args:
-        resolution_scale: Resolution scaling factor (1.0 = original, 2.0 = double)
+        resolution_scale: Patch size scale for model/training (default: GRADIENT_RES_SCALE)
         continue_training: Whether to continue from checkpoint
-        progressive_training: Whether to use progressive resolution scaling during training
     """
-    # Calculate scaled image size
-    scaled_img_size = int(IMG_SIZE * resolution_scale)
-    print(f"Training with resolution: {scaled_img_size}x{scaled_img_size} (scale={resolution_scale})")
-    
-    # Initialize model with appropriate resolution scale
-    model = SimpleUNet(resolution_scale=resolution_scale).to(DEVICE)
+    # Always use full image size for sampling/generation
+    full_img_size = int(IMG_SIZE * RESOLUTION_SCALE)
+    patch_size = int(IMG_SIZE * resolution_scale)
+    print(f"Training with patch size: {patch_size}x{patch_size} (scale={resolution_scale}), full image size: {full_img_size}x{full_img_size} (scale={RESOLUTION_SCALE})")
+    model = SimpleUNet(resolution_scale=RESOLUTION_SCALE).to(DEVICE)
+    # Enable gradient checkpointing for memory savings
+    if hasattr(model, 'gradient_checkpointing_enable'):
+        model.gradient_checkpointing_enable()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.MSELoss()
-    
-    # Reduced timesteps for better memory efficiency
-    timesteps = 500  # Reduced from 1000 to save memory
-    
-    # Compute diffusion parameters on CPU first
-    betas = linear_beta_schedule(timesteps)
-    betas = betas.to(DEVICE)
-    
-    # Use mixed precision for better performance and lower memory usage
-    scaler = torch.cuda.amp.GradScaler() if DEVICE.type == 'cuda' else None
-    
-    # Training state tracking
+    timesteps = 500
+    betas = linear_beta_schedule(timesteps).to(DEVICE)
+    scaler = torch.amp.GradScaler('cuda') if DEVICE.type == 'cuda' else None
     start_epoch = 0
     best_loss = float('inf')
-    patience = 20
+    patience = 100
     patience_counter = 0
-    curr_resolution_scale = resolution_scale
-    
-    # Resume from checkpoint if exists and continue_training is True
+    last_few_losses = []
     checkpoint_path = os.path.join(DATA_DIR, 'diffusion_checkpoint.pth')
     if continue_training and os.path.exists(checkpoint_path):
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            
-            # Check if the checkpoint has resolution scale info
-            stored_resolution = checkpoint.get('resolution_scale', 1.0)
-            
-            # If we're continuing with a different resolution
-            if stored_resolution != resolution_scale and progressive_training:
-                print(f"Scaling model from resolution {stored_resolution} to {resolution_scale}")
-                
-                # Load the old model first
-                temp_model = SimpleUNet(resolution_scale=stored_resolution).to('cpu')
-                temp_model.load_state_dict(checkpoint['model'])
-                
-                # Scale to new resolution and transfer weights
-                model = temp_model.scale_model_resolution(resolution_scale).to(DEVICE)
-                
-                # Recreate optimizer for new model
-                optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-                
-                # Maybe reduce learning rate for fine-tuning at higher resolution
-                if resolution_scale > stored_resolution:
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = LEARNING_RATE * 0.5
-                
-            else:
-                # Direct load if same resolution
-                model.load_state_dict(checkpoint['model'])
-                optimizer.load_state_dict(checkpoint['optimizer'])
-                
-            # Resume other training state
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint['epoch'] + 1
             best_loss = checkpoint.get('best_loss', best_loss)
             patience_counter = checkpoint.get('patience_counter', 0)
-            curr_resolution_scale = stored_resolution
-            
-            print(f"Resumed from epoch {start_epoch} with resolution scale {curr_resolution_scale}")
-            
+            print(f"Resumed from epoch {start_epoch}")
         except Exception as e:
             print(f"Failed to load checkpoint: {e}, starting fresh")
-    
-    # Memory management safety
     def safe_cleanup():
-        """Clean up CUDA memory if available"""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-      # Set maximum resolution limit for safety
-    MAX_RESOLUTION_SCALE = 2.0  # Maximum resolution scale to prevent GPU memory issues
-    
-    # For continuous training with automatic resolution scaling
-    last_few_losses = []  # Track recent losses for overfitting detection
-    loss_plateau_count = 0  # Count epochs with minimal improvement
-    auto_resolution_scaling = True  # Enable automatic resolution scaling
-        
-    # Progressive resolution schedule for curriculum learning
-    if progressive_training:
-        # Start with lower resolution and increase gradually
-        resolution_schedule = {
-            0: 1.0,      # Start with base resolution  
-            100: 1.25,   # Increase after 100 epochs
-            200: 1.5,    # Further increase after 200 epochs
-            300: 1.75,   # Maximum resolution after 300 epochs
-            400: 2.0     # Final resolution (if memory permits)
-        }
-    else:
-        # Use fixed resolution throughout training
-        resolution_schedule = {0: resolution_scale}
-    
-    for epoch in range(start_epoch, EPOCHS):
-        # Only allow resolution to increase (never decrease)
-        if progressive_training:
-            scheduled_scale = max([scale for e, scale in resolution_schedule.items() if e <= epoch], default=curr_resolution_scale)
-            target_scale = max(curr_resolution_scale, scheduled_scale)
-            if target_scale > curr_resolution_scale + 1e-6:
-                print(f"Progressive scaling: Updating resolution from {curr_resolution_scale} to {target_scale}")
-                model = model.scale_model_resolution(target_scale).to(DEVICE)
-                old_lr = optimizer.param_groups[0]['lr']
-                optimizer = optim.Adam(model.parameters(), lr=old_lr * 0.75)
-                curr_resolution_scale = target_scale
-                safe_cleanup()
-        # Training loop
+    while True:
         model.train()
         running_loss = 0
         batch_count = 0
         safe_cleanup()
         for batch_idx, imgs in enumerate(train_loader):
-            try:
-                # Resize images if needed for current resolution
-                if curr_resolution_scale != 1.0:
-                    current_size = int(IMG_SIZE * curr_resolution_scale)
-                    if imgs.shape[2] != current_size:
+            retry_count = 0
+            while retry_count < 3:
+                try:
+                    # Always resize images to full RESOLUTION_SCALE
+                    current_full_size = int(IMG_SIZE * RESOLUTION_SCALE)
+                    if imgs.shape[2] != current_full_size:
                         resized_imgs = []
                         for img in imgs:
                             resized = torch.nn.functional.interpolate(
-                                img.unsqueeze(0), 
-                                size=(current_size, current_size),
+                                img.unsqueeze(0),
+                                size=(current_full_size, current_full_size),
                                 mode='bilinear',
-                                align_corners=False
+                                align_corners=True
                             )
                             resized_imgs.append(resized.squeeze(0))
                         imgs = torch.stack(resized_imgs)
-                imgs = imgs.to(DEVICE)
-                t = torch.randint(0, timesteps, (imgs.size(0),), device=DEVICE).long()
-                noisy_imgs, noise = forward_diffusion_sample(imgs, t, betas)
-                optimizer.zero_grad(set_to_none=True)
-                # Use new torch.amp API if available
-                if scaler:
-                    with torch.amp.autocast('cuda'):
+                    # Random crop patch for each image in the batch
+                    patches = []
+                    for img in imgs:
+                        h, w = img.shape[1:]
+                        top = torch.randint(0, h - patch_size + 1, (1,)).item() if h > patch_size else 0
+                        left = torch.randint(0, w - patch_size + 1, (1,)).item() if w > patch_size else 0
+                        patch = img[:, top:top+patch_size, left:left+patch_size]
+                        patches.append(patch)
+                    imgs = torch.stack(patches)
+                    imgs = imgs.to(DEVICE)
+                    t = torch.randint(0, timesteps, (imgs.size(0),), device=DEVICE).long()
+                    noisy_imgs, noise = forward_diffusion_sample(imgs, t, betas)
+                    optimizer.zero_grad(set_to_none=True)
+                    if scaler:
+                        with torch.amp.autocast('cuda'):
+                            pred = model(noisy_imgs)
+                            if pred.shape != noise.shape:
+                                target_size = (pred.shape[2], pred.shape[3])
+                                noise = torch.nn.functional.interpolate(
+                                    noise,
+                                    size=target_size,
+                                    mode='bilinear',
+                                    align_corners=True
+                                )
+                            assert pred.shape == noise.shape, f"Shape mismatch: pred {pred.shape} vs noise {noise.shape}"
+                            loss = criterion(pred, noise)
+                            scaler.scale(loss).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
+                    else:
                         pred = model(noisy_imgs)
+                        if pred.shape != noise.shape:
+                            target_size = (pred.shape[2], pred.shape[3])
+                            noise = torch.nn.functional.interpolate(
+                                noise,
+                                size=target_size,
+                                mode='bilinear',
+                                align_corners=True
+                            )
+                        assert pred.shape == noise.shape, f"Shape mismatch: pred {pred.shape} vs noise {noise.shape}"
                         loss = criterion(pred, noise)
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    pred = model(noisy_imgs)
-                    loss = criterion(pred, noise)
-                    loss.backward()
-                    optimizer.step()
-                running_loss += loss.item()
-                batch_count += 1
-                if (batch_idx + 1) % 10 == 0:
-                    print(f"Epoch {epoch+1}/{EPOCHS} - Batch {batch_idx+1}/{len(train_loader)}, "
-                          f"Loss: {running_loss/batch_count:.4f}, Resolution: {curr_resolution_scale}")
-                    if DEVICE.type == 'cuda':
+                        loss.backward()
+                        optimizer.step()
+                    running_loss += loss.item()
+                    batch_count += 1
+                    if (batch_idx + 1) % 10 == 0:
+                        print(f"Epoch {start_epoch+1} - Batch {batch_idx+1}/{len(train_loader)}, "
+                              f"Loss: {running_loss/batch_count:.4f}, Patch: {patch_size}, Full: {current_full_size}")
+                        if DEVICE.type == 'cuda':
+                            torch.cuda.empty_cache()
+                    break
+                except RuntimeError as e:
+                    if ("CUDNN_STATUS_EXECUTION_FAILED" in str(e)) or ("CUDA out of memory" in str(e)):
+                        print(f"cuDNN/CUDA error detected on batch {batch_idx}, retry {retry_count+1}/3. Attempting recovery...")
+                        clean_memory()
                         torch.cuda.empty_cache()
-            except RuntimeError as e:
-                if ("CUDNN_STATUS_EXECUTION_FAILED" in str(e)) or ("CUDA out of memory" in str(e)):
-                    print("cuDNN/CUDA error detected, attempting recovery...")
-                    clean_memory()
-                    torch.cuda.empty_cache()
-                    continue  # skip this batch
-                else:
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+                    else:
+                        raise
+                except Exception as e:
+                    print(f"Non-CUDA error on batch {batch_idx}: {e}")
                     raise
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch+1}/{EPOCHS} completed, Avg Loss: {avg_loss:.4f}, "
-              f"Resolution: {curr_resolution_scale}")
+        print(f"Epoch {start_epoch+1} completed, Avg Loss: {avg_loss:.4f}, Patch: {patch_size}, Full: {current_full_size}")
         last_few_losses.append(avg_loss)
         if len(last_few_losses) > 10:
             last_few_losses.pop(0)
-        if len(last_few_losses) >= 5:
-            recent_avg = sum(last_few_losses[-5:]) / 5
-            older_avg = sum(last_few_losses[:-5]) / min(5, len(last_few_losses[:-5]) or 1)
-            improvement_rate = (older_avg - recent_avg) / older_avg if older_avg > 0 else 0
-            if improvement_rate < 0.005:
-                loss_plateau_count += 1
-            else:
-                loss_plateau_count = 0
-            if auto_resolution_scaling and loss_plateau_count >= 3 and curr_resolution_scale < MAX_RESOLUTION_SCALE:
-                next_resolution = min(curr_resolution_scale * 1.2, MAX_RESOLUTION_SCALE)
-                if next_resolution > curr_resolution_scale + 0.01:
-                    print(f"Detected training plateau! Automatically increasing resolution from {curr_resolution_scale} to {next_resolution}")
-                    try:
-                        safe_cleanup()
-                        model = model.scale_model_resolution(next_resolution).to(DEVICE)
-                        old_lr = optimizer.param_groups[0]['lr']
-                        optimizer = optim.Adam(model.parameters(), lr=old_lr * 0.7)
-                        curr_resolution_scale = next_resolution
-                        patience_counter = 0
-                        loss_plateau_count = 0
-                        last_few_losses = []
-                        safe_cleanup()
-                    except RuntimeError as e:
-                        print(f"Error during auto-scaling: {e}")
-                        print("Continuing with current resolution...")
-                        loss_plateau_count = 0
         if avg_loss < best_loss:
             best_loss = avg_loss
             patience_counter = 0
-            loss_plateau_count = max(0, loss_plateau_count - 1)
             try:
                 torch.save({
                     'state_dict': model.state_dict(),
-                    'resolution_scale': curr_resolution_scale,
+                    'resolution_scale': RESOLUTION_SCALE,
                     'config': model.config
                 }, os.path.join(DATA_DIR, 'best_diffusion_model.pth'))
                 print(f"New best model saved with loss: {best_loss:.4f}")
@@ -582,46 +515,25 @@ def train(resolution_scale=RESOLUTION_SCALE, continue_training=True, progressive
             patience_counter += 1
             print(f"No improvement: {patience_counter}/{patience}")
             if patience_counter >= patience:
-                if auto_resolution_scaling and curr_resolution_scale < MAX_RESOLUTION_SCALE:
-                    next_resolution = min(curr_resolution_scale * 1.25, MAX_RESOLUTION_SCALE)
-                    if next_resolution > curr_resolution_scale + 0.01:
-                        print(f"No improvement for {patience} epochs! Trying increased resolution from {curr_resolution_scale} to {next_resolution}")
-                        try:
-                            safe_cleanup()
-                            model = model.scale_model_resolution(next_resolution).to(DEVICE)
-                            optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE * 0.5)
-                            curr_resolution_scale = next_resolution
-                            patience_counter = 0
-                            loss_plateau_count = 0
-                            last_few_losses = []
-                            safe_cleanup()
-                        except RuntimeError as e:
-                            print(f"Error during resolution increase: {e}")
-                            print("Early stopping due to no improvement.")
-                            break
-                    else:
-                        print("Early stopping: No improvement detected and max resolution reached.")
-                        break
-                else:
-                    print("Early stopping: No improvement detected.")
-                    break
-        if (epoch+1) % 5 == 0:
+                print(f"No improvement for {patience} epochs! Stopping training.")
+                break
+        if (start_epoch+1) % 5 == 0:
             try:
                 torch.save({
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'epoch': epoch,
+                    'epoch': start_epoch,
                     'best_loss': best_loss,
                     'patience_counter': patience_counter,
-                    'resolution_scale': curr_resolution_scale
+                    'resolution_scale': RESOLUTION_SCALE
                 }, checkpoint_path)
-                ckpt_file = os.path.join(DATA_DIR, f'diffusion_model_epoch{epoch+1}_res{curr_resolution_scale}.pth')
+                ckpt_file = os.path.join(DATA_DIR, f'diffusion_model_epoch{start_epoch+1}_res{RESOLUTION_SCALE}.pth')
                 torch.save({
                     'state_dict': model.state_dict(),
-                    'resolution_scale': curr_resolution_scale,
+                    'resolution_scale': RESOLUTION_SCALE,
                     'config': model.config
                 }, ckpt_file)
-                print(f"Saved checkpoint at epoch {epoch+1}")
+                print(f"Saved checkpoint at epoch {start_epoch+1}")
                 ckpts = sorted(glob.glob(os.path.join(DATA_DIR, 'diffusion_model_epoch*.pth')), 
                                key=os.path.getmtime, reverse=True)
                 for old_ckpt in ckpts[3:]:
@@ -632,6 +544,7 @@ def train(resolution_scale=RESOLUTION_SCALE, continue_training=True, progressive
             except Exception as e:
                 print(f"Error during checkpoint saving: {e}")
         safe_cleanup()
+        start_epoch += 1
     print("Training complete.")
 
 # --- IMAGE SAMPLING FUNCTION WITH RESOLUTION SUPPORT ---
@@ -853,17 +766,14 @@ if __name__ == '__main__':
     
     # Enable CUDA error debugging (for misaligned address and memory issues)
     os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-    
-    # Setup command line arguments
+      # Setup command line arguments
     parser = argparse.ArgumentParser(description='Axolotl Diffusion Model with Progressive Scaling')
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'sample', 'scale'], 
+    parser.add_argument('mode', type=str, nargs='?', default='train', choices=['train', 'sample', 'scale'], 
                         help='Mode to run in: train, sample, or scale (converts model to new resolution)')
     
     # Training arguments
-    parser.add_argument('--resolution', type=float, default=RESOLUTION_SCALE,
-                        help='Resolution scale factor (1.0=original, 2.0=double)')
-    parser.add_argument('--no-progressive', action='store_true',
-                        help='Disable progressive resolution scaling during training')
+    parser.add_argument('--resolution', type=float, default=GRADIENT_RES_SCALE,
+                        help='Resolution scale factor for training (default: GRADIENT_RES_SCALE, e.g. 0.5). Use a higher value only if you have enough VRAM. For sampling/generation, use RESOLUTION_SCALE.')
     parser.add_argument('--fresh', action='store_true',
                         help='Start training from scratch (ignore checkpoints)')
                         
@@ -971,15 +881,12 @@ if __name__ == '__main__':
         
         else:  # Train mode
             print(f"Starting diffusion model training at resolution {args.resolution}")
-            if args.no_progressive:
-                print("Progressive resolution scaling disabled")
                 
             # Clean memory before training
             clean_memory()
             train(
                 resolution_scale=args.resolution,
-                continue_training=not args.fresh,
-                progressive_training=not args.no_progressive
+                continue_training=not args.fresh
             )
             
     except RuntimeError as e:

@@ -68,33 +68,24 @@ if __name__ == '__main__':
 
     # Large, diverse list of search queries
     keywords = [
-        'axolotl close up photo', 'axolotl macro photography', 'axolotl aquarium closeup', 'axolotl face',
-        'axolotl portrait', 'axolotl real photo', 'axolotl underwater photo', 'axolotl natural habitat',
-        'axolotl hd photo', 'axolotl high resolution photo', 'axolotl in tank', 'axolotl pet',
-        'axolotl in water', 'axolotl swimming', 'axolotl eating', 'axolotl mouth open',
-        'axolotl gills closeup', 'axolotl albino', 'axolotl wild', 'axolotl black',
-        'axolotl white', 'axolotl golden', 'axolotl blue', 'axolotl rare',
-        'axolotl smiling', 'axolotl eyes', 'axolotl macro shot', 'axolotl underwater macro',
-        'axolotl habitat', 'axolotl in aquarium', 'axolotl on gravel', 'axolotl with plants',
-        'axolotl in nature', 'axolotl in river', 'axolotl close up head', 'axolotl close up body',
-        'axolotl close up skin', 'axolotl close up tail', 'axolotl close up hand', 'axolotl close up foot',
-        'axolotl close up eye', 'axolotl close up gills', 'axolotl close up mouth', 'axolotl close up nose',
-        'axolotl close up teeth', 'axolotl close up smile', 'axolotl close up eating', 'axolotl close up swimming',
-        'axolotl close up albino', 'axolotl close up wild', 'axolotl close up black', 'axolotl close up white',
-        'axolotl close up golden', 'axolotl close up blue', 'axolotl close up rare', 'axolotl close up macro',
-        'axolotl close up hd', 'axolotl close up high resolution', 'axolotl close up pet', 'axolotl close up tank',
-        'axolotl close up aquarium', 'axolotl close up river', 'axolotl close up nature', 'axolotl close up plants',
-        'axolotl close up gravel', 'axolotl close up water', 'axolotl close up habitat', 'axolotl close up portrait',
-        'axolotl close up real photo', 'axolotl close up natural habitat', 'axolotl close up macro photography',
-        'axolotl close up hd photo', 'axolotl close up high resolution photo', 'axolotl close up in tank',
-        'axolotl close up in aquarium', 'axolotl close up in water', 'axolotl close up in river',
-        'axolotl close up in nature', 'axolotl close up in plants', 'axolotl close up in gravel',
-        'axolotl close up in habitat', 'axolotl close up in portrait', 'axolotl close up in real photo',
-        'axolotl close up in natural habitat', 'axolotl close up in macro photography', 'axolotl close up in hd photo',
-        'axolotl close up in high resolution photo', 'axolotl close up in pet', 'axolotl close up in wild',
-        'axolotl close up in black', 'axolotl close up in white', 'axolotl close up in golden', 'axolotl close up in blue',
-        'axolotl close up in rare', 'axolotl close up in macro', 'axolotl close up in hd', 'axolotl close up in high resolution'
-    ]
+    "real axolotl photograph", "authentic axolotl photo", "actual axolotl close up", "real life axolotl macro shot",
+    "photograph of real axolotl", "axolotl in real aquarium", "natural axolotl image", "axolotl in true habitat",
+    "unfiltered axolotl photo", "unedited axolotl picture", "genuine axolotl underwater", "realistic axolotl in tank",
+    "true axolotl head closeup", "axolotl real skin photo", "photoreal axolotl in water", "axolotl real eyes",
+    "real axolotl pet photography", "real environment axolotl", "actual photo of axolotl face",
+    "real axolotl dorsal view", "HD real axolotl in aquarium", "axolotl real gills macro", "natural light real axolotl",
+    "documentary axolotl photo", "captured real axolotl moment", "real axolotl movement underwater",
+    "real photo of axolotl in glass tank", "realistic texture axolotl photo", "real closeup of axolotl mouth",
+    "axolotl in real water tank", "true color axolotl image", "real photo of axolotl breathing", 
+    "close photo of real axolotl smile", "real-life axolotl swimming photo", "real pet axolotl on gravel",
+    "realistic axolotl with plants", "axolotl in natural stream photo", "real axolotl eating worm photo",
+    "raw image of axolotl in tank", "unedited shot of real axolotl", "real close image of axolotl body",
+    "macro real-life axolotl shot", "actual axolotl in clean tank", "photograph of real albino axolotl",
+    "high-res real axolotl face", "realistic axolotl captured on camera", "real photo of wild axolotl",
+    "true pet axolotl in aquarium", "real closeup of axolotl foot", "photo of axolotl in clear water"
+]
+
+
     used_keywords = set()
     total_downloaded = len(os.listdir(OUT_DIR))
     existing_hashes = get_existing_hashes(OUT_DIR)
@@ -103,29 +94,31 @@ if __name__ == '__main__':
             if kw in used_keywords:
                 continue
             print(f"Searching for: {kw}")
-            # Download to a temp folder to check for duplicates before moving
-            temp_dir = os.path.join(OUT_DIR, 'temp')
-            os.makedirs(temp_dir, exist_ok=True)
-            temp_crawler = BingImageCrawler(storage={'root_dir': temp_dir})
-            temp_crawler.crawl(
+            # Download directly to OUT_DIR
+            before_files = set(os.listdir(OUT_DIR))
+            bing_crawler.crawl(
                 keyword=kw,
                 filters={
                     'type': 'photo',
                     'size': 'large',
                     'color': 'color'
                 },
-                max_num=1000
+                max_num=100000000
             )
-            # Only move non-duplicate, valid images to OUT_DIR
-            for fname in os.listdir(temp_dir):
-                fpath = os.path.join(temp_dir, fname)
+            # Check for new files and remove duplicates
+            after_files = set(os.listdir(OUT_DIR))
+            new_files = after_files - before_files
+            for fname in new_files:
+                fpath = os.path.join(OUT_DIR, fname)
                 h = image_hash(fpath)
-                if h and h not in existing_hashes and is_valid_image(fpath):
-                    shutil.move(fpath, os.path.join(OUT_DIR, fname))
-                    existing_hashes.add(h)
+                # Only remove the file if it is a duplicate or invalid, never touch pre-existing files
+                if not h or h in existing_hashes or not is_valid_image(fpath):
+                    try:
+                        os.remove(fpath)
+                    except Exception:
+                        pass
                 else:
-                    os.remove(fpath)
-            os.rmdir(temp_dir)
+                    existing_hashes.add(h)
             used_keywords.add(kw)
             total_downloaded = len(os.listdir(OUT_DIR))
             print(f"Total images so far: {total_downloaded}")

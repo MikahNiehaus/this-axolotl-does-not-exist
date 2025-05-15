@@ -4,7 +4,12 @@ import base64
 from models.generator import AxolotlGenerator
 import numpy as np
 from PIL import Image
-from flask_cors import CORS
+f@app.route('/generate', methods=['GET'])
+def generate_image():
+    # Clear indicator that we're using the GAN for image generation
+    print("Generating image with GAN model (not diffusion)")
+    img_str = AxolotlImageAPI.generate_single_image()
+    return jsonify({'image': img_str, 'model_type': 'GAN'})flask_cors import CORS
 import os
 import time
 
@@ -23,6 +28,7 @@ class AxolotlImageAPI:
     @staticmethod
     def generate_single_image():
         # Use the exact same GAN sample command from train_gan.py for best quality
+        print("=== GENERATING IMAGE USING GAN MODEL NOT DIFFUSION ===")
         try:
             import torch
             import torch.nn as nn
@@ -97,6 +103,27 @@ class AxolotlImageAPI:
             
             # Create trainer and generate sample
             trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)
+
+            # Get the actual image size from checkpoint if available
+            try:
+                if os.path.exists(CHECKPOINT_PATH):
+                    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+                    # Update the model to use the size from the checkpoint
+                    if checkpoint.get('G') and len(checkpoint['G']) > 0:
+                        # Extract first layer weight shape to determine model size
+                        for key in checkpoint['G']:
+                            if 'weight' in key and len(checkpoint['G'][key].shape) > 2:
+                                # Update the model size from checkpoint if needed
+                                img_size_factor = checkpoint['G'][key].shape[2] // 4
+                                if img_size_factor > 1:
+                                    print(f"Detected image size factor: {img_size_factor}")
+                                    trainer = GANTrainer(img_size=IMG_SIZE * img_size_factor, 
+                                                         z_dim=Z_DIM, device=DEVICE)
+                                break
+            except Exception as e:
+                print(f"Failed to detect model size from checkpoint: {str(e)}")
+            
+            # Now load the checkpoint onto the correctly sized model
             trainer.load_checkpoint()
             img_bytes = trainer.generate_sample()
                 
@@ -135,8 +162,13 @@ def health_check():
 
 @app.route('/generate', methods=['GET'])
 def generate_image():
+    # Clear indicator that we're using the GAN for image generation
+    print("Generating image with GAN model (not diffusion)")
     img_b64 = AxolotlImageAPI.generate_single_image()
-    return jsonify({'image': img_b64})
+    return jsonify({
+        'image': img_b64,
+        'model_type': 'GAN'  # Explicitly indicate we're using GAN not diffusion
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

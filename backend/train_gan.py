@@ -37,23 +37,49 @@ os.makedirs(SAMPLE_DIR, exist_ok=True)
 # --- DATASET ---
 class AxolotlDataset(Dataset):
     def __init__(self, folder, transform=None):
-        self.files = glob.glob(os.path.join(folder, '*'))
+        self.folder = folder
         self.transform = transform
+        self.reload_files()
+        
+    def reload_files(self):
+        self.files = glob.glob(os.path.join(self.folder, '*'))
+        if len(self.files) == 0:
+            raise RuntimeError(f"No files found in {self.folder}")
+        
     def __len__(self):
         return len(self.files)
+        
     def __getitem__(self, idx):
-        img = Image.open(self.files[idx]).convert('RGB')
-        if self.transform:
-            img = self.transform(img)
-        return img
+        # Robust to missing/corrupted files
+        try:
+            img = Image.open(self.files[idx]).convert('RGB')
+            if self.transform:
+                img = self.transform(img)
+            return img
+        except Exception as e:
+            print(f"Warning: failed to load {self.files[idx]}: {e}")
+            # Remove the bad file from the list
+            del self.files[idx]
+            # If no files left, raise
+            if not self.files:
+                raise RuntimeError("No valid images left in dataset!")
+            # If too many files are missing, reload file list from disk
+            if len(self.files) < 10:
+                print("Reloading file list from disk due to too many missing files...")
+                self.reload_files()
+            # Clamp idx to valid range
+            idx = idx % len(self.files)
+            return self.__getitem__(idx)
 
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
-    transforms.RandomRotation(20),
+    # Use fill=1 to fill with white instead of black during rotation and prevent black artifacts
+    transforms.RandomRotation(20, fill=1),
     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
+    # Limit shear to prevent black edges
+    transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.95, 1.05), shear=5, fill=1),
     transforms.ToTensor(),
     transforms.Normalize([0.5]*3, [0.5]*3)
 ])
@@ -115,8 +141,13 @@ class GANTrainer:
     def upscale(self):
         new_size = min(self.img_size * self.upscale_factor, self.max_img_size)
         if new_size == self.img_size:
-            print("[INFO] Already at max image size, cannot upscale further.")
-            return False
+            print("[INFO] Already at max image size. Continuing with quality improvements.")
+            # Refresh the model parameters to break out of local minima without changing resolution
+            self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE * 0.8, betas=(0.5, 0.999))
+            self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE * 0.8, betas=(0.5, 0.999))
+            # Still return True to reset no_improve counter and continue training
+            return True
+            
         print(f"[INFO] Upscaling GAN from {self.img_size} to {new_size}.")
         # Recreate Generator and Discriminator with new size
         self.img_size = new_size
@@ -257,7 +288,8 @@ class GANTrainer:
             if hasattr(self, 'checkpointing_level') and self.checkpointing_level > 0:
                 self.enable_gradient_checkpointing()
 
-    def train(self, train_loader, epochs=10000, sample_interval=1000):
+    def train(self, train_loader, epochs=float('inf'), sample_interval=1000):
+        # Set epochs to infinity to train forever
         local_train_loader = train_loader
         self.load_checkpoint()
         epoch = self.start_epoch
@@ -336,9 +368,11 @@ class GANTrainer:
                             transforms.Resize((self.img_size, self.img_size)),
                             transforms.RandomHorizontalFlip(),
                             transforms.RandomVerticalFlip(),
-                            transforms.RandomRotation(20),
+                            # Use fill=1 to fill with white instead of black during rotation and prevent black artifacts
+                            transforms.RandomRotation(20, fill=1),
                             transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-                            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1), shear=10),
+                            # Limit shear to prevent black edges
+                            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.95, 1.05), shear=5, fill=1),
                             transforms.ToTensor(),
                             transforms.Normalize([0.5]*3, [0.5]*3)
                         ])

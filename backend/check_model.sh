@@ -26,6 +26,8 @@ if [ ! -f "$CHECKPOINT_PATH" ]; then
     # This is just a placeholder to ensure the app doesn't crash in test environments
     # In a real deployment, you should have your model file included in your repository
     python -c "import torch; torch.save({'G': {}, 'D': {}, 'epoch': 0}, '$CHECKPOINT_PATH')"
+else
+    echo "Using GAN checkpoint: $CHECKPOINT_PATH (updates every 100 epochs during training)"
 fi
 
 echo "Model check complete."

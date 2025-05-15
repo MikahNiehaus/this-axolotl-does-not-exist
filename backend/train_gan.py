@@ -8,6 +8,7 @@ from torchvision import transforms
 from torchvision.utils import save_image
 from PIL import Image
 from models.gan_modules import Generator, Discriminator
+from models.git_model_handler import GitModelHandler
 from tqdm import tqdm
 import argparse
 
@@ -29,7 +30,7 @@ Z_DIM = 100
 CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
 SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-SAMPLE_INTERVAL = 1000
+SAMPLE_INTERVAL = 100
 
 os.makedirs(SAMPLE_DIR, exist_ok=True)
 
@@ -80,6 +81,34 @@ class GANTrainer:
         self.upscale_factor = 2  # Double the image size on each upscale
         self.max_img_size = 128  # Maximum image size for upscaling
         self.checkpointing_level = 0  # For VRAM fallback
+        
+        # Initialize the Git model handler for automatic pushes
+        self.git_push_interval = 1000  # Push to Git every 1000 epochs
+        
+        # Set up Git integration if possible
+        self.git_enabled = self._check_git_available()
+        if self.git_enabled:
+            try:
+                self.git_handler = GitModelHandler(CHECKPOINT_PATH)
+                print("[GIT] Git integration enabled - Model will be pushed to main branch every 1000 epochs")
+            except Exception as e:
+                print(f"[GIT] Warning: Could not initialize Git handler: {str(e)}")
+                self.git_enabled = False
+        
+    def _check_git_available(self):
+        """Check if Git is available and we're in a Git repository"""
+        try:
+            # Try to execute a simple git command
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"], 
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def upscale(self):
         new_size = min(self.img_size * self.upscale_factor, self.max_img_size)
@@ -106,6 +135,7 @@ class GANTrainer:
             print(f"[VRAM] Enabled gradient checkpointing on Discriminator (level {self.checkpointing_level})")
 
     def save_checkpoint(self, epoch):
+        """Save model checkpoint and push to Git at specified intervals"""
         torch.save({
             'G': self.G.state_dict(),
             'D': self.D.state_dict(),
@@ -113,6 +143,15 @@ class GANTrainer:
             'opt_D': self.opt_D.state_dict(),
             'epoch': epoch
         }, CHECKPOINT_PATH)
+        
+        # Push to Git every git_push_interval epochs
+        if self.git_enabled and (epoch + 1) % self.git_push_interval == 0:
+            print(f"[GIT] Pushing model checkpoint at epoch {epoch+1} to Git main branch...")
+            try:
+                self.git_handler.update_model_in_git(epoch_num=epoch+1)
+            except Exception as e:
+                print(f"[GIT] Warning: Failed to push model to Git: {str(e)}")
+                print("[GIT] Continuing training without Git push")
 
     def load_checkpoint(self):
         if os.path.exists(CHECKPOINT_PATH):
@@ -199,11 +238,11 @@ class GANTrainer:
                         print("[INFO] Max image size reached. Continuing training at current resolution.")
                         no_improve = 0
                 if (epoch + 1) % sample_interval == 0 or epoch == 0:
-                    print(f"[Epoch {epoch+1}] Saving sample...")
+                    print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)
                     self.save_checkpoint(epoch)
-                # Update sample_epochmanual.png every 100 epochs
-                if (epoch + 1) % 100 == 0:
+                    
+                    # Also update the manual sample image (now on the same schedule as checkpoints)
                     self.G.eval()
                     with torch.no_grad():
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()

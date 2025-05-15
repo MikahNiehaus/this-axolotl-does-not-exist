@@ -16,30 +16,32 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [regen, setRegen] = useState(0)
   const [modelType, setModelType] = useState('GAN') // Default to GAN
-    useEffect(() => {
+  const [logs, setLogs] = useState([])
+  const [error, setError] = useState(null)
+  useEffect(() => {
     setLoading(true)
+    setLogs([])
+    setError(null)
     console.log('[Axolotl GAN Demo] Fetching:', `${API_BASE}/generate`);
-    
     fetch(`${API_BASE}/generate`)
       .then(res => res.json())
       .then(data => {
         console.log('[Axolotl GAN Demo] Backend response:', data);
-        const imgData = `data:image/png;base64,${data.image}`;
-        console.log('[Axolotl GAN Demo] Image data:', imgData);
-        
-        // Always use model_type from API if available, fall back to default value
+        const imgData = data.image ? `data:image/png;base64,${data.image}` : null;
+        setLogs(data.logs || []);
+        setError(data.error || null);
         if (data.model_type) {
           setModelType(data.model_type);
           console.log(`[Axolotl Demo] Using model type from API: ${data.model_type}`);
         } else {
           console.log(`[Axolotl Demo] Using default model type: ${modelType}`);
         }
-        
         setImage(imgData);
         setLoading(false);
       })
       .catch((err) => {
         console.error('[Axolotl GAN Demo] Fetch error:', err);
+        setError('Network or server error: ' + err.message);
         setLoading(false);
       })
   }, [regen])
@@ -118,10 +120,33 @@ function App() {
             >
               Generate New Axolotl
             </button>
+            {/* Show backend logs and errors */}
+            {(logs.length > 0 || error) && (
+              <div style={{
+                marginTop: 24,
+                width: 420,
+                background: '#f8f6ff',
+                border: '1px solid #b48be4',
+                borderRadius: 10,
+                padding: 16,
+                color: '#4b2e83',
+                fontFamily: 'monospace',
+                fontSize: 14,
+                textAlign: 'left',
+                boxShadow: '0 2px 8px #b48be433'
+              }}>
+                <div style={{fontWeight: 'bold', marginBottom: 6}}>Backend Logs:</div>
+                {logs.map((line, idx) => (
+                  <div key={idx}>{line}</div>
+                ))}
+                {error && (
+                  <div style={{color: '#c0392b', marginTop: 8, fontWeight: 'bold'}}>Error: {error}</div>
+                )}
+              </div>
+            )}
           </div>
         )
       )}
-    
     </>
   )
 }

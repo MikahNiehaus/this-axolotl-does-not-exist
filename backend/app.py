@@ -106,8 +106,29 @@ def health_check():
 
 @app.route('/generate', methods=['GET'])
 def generate_image():
-    img_b64 = AxolotlImageAPI.generate_single_image()
-    return jsonify({'image': img_b64})
+    logs = []
+    img_b64 = None
+    model_type = 'GAN'
+    error = None
+    try:
+        import sys
+        import traceback
+        from contextlib import redirect_stdout, redirect_stderr
+        import io as sysio
+        log_buffer = sysio.StringIO()
+        with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
+            img_b64 = AxolotlImageAPI.generate_single_image()
+        logs = log_buffer.getvalue().splitlines()
+    except Exception as e:
+        error = str(e)
+        logs.append('Exception: ' + error)
+        logs.append(traceback.format_exc())
+    return jsonify({
+        'image': img_b64,
+        'model_type': model_type,
+        'logs': logs,
+        'error': error
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

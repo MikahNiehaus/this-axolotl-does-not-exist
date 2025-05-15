@@ -8,6 +8,7 @@ function App() {
   const [count, setCount] = useState(0)
   const [image, setImage] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [regen, setRegen] = useState(0)
 
   useEffect(() => {
     setLoading(true)
@@ -18,7 +19,7 @@ function App() {
         setLoading(false)
       })
       .catch(() => setLoading(false))
-  }, [])
+  }, [regen])
 
   return (
     <>
@@ -68,6 +69,22 @@ function App() {
               }}
             >
               Download Image
+            </button>
+            <button
+              style={{
+                padding: '10px 24px',
+                fontSize: 18,
+                background: '#7ed6df',
+                color: '#222',
+                border: 'none',
+                borderRadius: 8,
+                cursor: 'pointer',
+                marginTop: 8,
+                marginLeft: 8
+              }}
+              onClick={() => setRegen(r => r + 1)}
+            >
+              Generate New Axolotl
             </button>
           </div>
         )

@@ -21,6 +21,14 @@ backend/data/best_diffusion_model.pth
 backend/kaggle.json
 backend/generated_axolotls/
 
+# Ensure model files are not ignored
+*.pth
+*.pt
+*.h5
+!backend/data/gan_checkpoint.pth
+!backend/data/gan_samples/
+!backend/data/best_diffusion_model.pth
+
 # Virtual environments
 .env
 .venv

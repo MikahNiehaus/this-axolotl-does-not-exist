@@ -53,7 +53,11 @@ class AxolotlImageAPI:
                 def load_checkpoint(self):
                     log(f"Looking for checkpoint at: {CHECKPOINT_PATH}")
                     if os.path.exists(CHECKPOINT_PATH):
-                        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                        try:
+                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
+                        except TypeError as e:
+                            log(f"torch.load does not support weights_only argument (PyTorch <2.6?): {str(e)}. Retrying without it.")
+                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
                         log(f"Checkpoint keys: {list(checkpoint.keys())}")
                         self.G.load_state_dict(checkpoint['G'])
                         log("Loaded checkpoint for generating sample")

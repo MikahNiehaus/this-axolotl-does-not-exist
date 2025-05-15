@@ -14,10 +14,8 @@ backend/data/train/
 backend/data/test/
 backend/data/axolotl_scraped/
 backend/data/Axolotl/
-backend/data/*.pth
 backend/data/diffusion_checkpoint.pth
 backend/data/diffusion_model_epoch*.pth
-backend/data/best_diffusion_model.pth
 backend/kaggle.json
 backend/generated_axolotls/
 
@@ -25,8 +23,9 @@ backend/generated_axolotls/
 *.pth
 *.pt
 *.h5
+# Exception for model files we need for deployment
 !backend/data/gan_checkpoint.pth
-!backend/data/gan_samples/
+!backend/data/gan_samples/**
 !backend/data/best_diffusion_model.pth
 
 # Virtual environments

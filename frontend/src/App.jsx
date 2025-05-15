@@ -16,14 +16,20 @@ function App() {
 
   useEffect(() => {
     setLoading(true)
-    console.log('[Axolotl GAN Demo] Fetching:', `https://this-axolotl-does-not-exist-production.up.railway.app/generate`);
+    console.log('[Axolotl GAN Demo] Fetching:', `${API_BASE}/generate`);
     fetch(`${API_BASE}/generate`)
       .then(res => res.json())
       .then(data => {
-        setImage(`data:image/png;base64,${data.image}`)
+        console.log('[Axolotl GAN Demo] Backend response:', data);
+        const imgData = `data:image/png;base64,${data.image}`;
+        console.log('[Axolotl GAN Demo] Image data:', imgData);
+        setImage(imgData)
         setLoading(false)
       })
-      .catch(() => setLoading(false))
+      .catch((err) => {
+        console.error('[Axolotl GAN Demo] Fetch error:', err);
+        setLoading(false)
+      })
   }, [regen])
 
   return (

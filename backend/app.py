@@ -39,7 +39,6 @@ class AxolotlImageAPI:
             DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
             SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
             FULL_MODEL_PATH = os.path.join(DATA_DIR, 'gan_full_model.pth')
-            CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
             IMG_SIZE = 32
             Z_DIM = 100
             DEVICE = torch.device('cpu')
@@ -52,19 +51,15 @@ class AxolotlImageAPI:
                     self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
                     self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
                 def load_model(self):
-                    # Prefer full model if available
                     if os.path.exists(FULL_MODEL_PATH):
                         log(f"Loading full model from: {FULL_MODEL_PATH}")
                         checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
-                    elif os.path.exists(CHECKPOINT_PATH):
-                        log(f"Loading checkpoint from: {CHECKPOINT_PATH}")
-                        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                        log(f"Checkpoint keys: {list(checkpoint.keys())}")
+                        self.G.load_state_dict(checkpoint['G'])
+                        log("Loaded model for generating sample")
                     else:
-                        log("No model file found, using untrained generator")
-                        return
-                    log(f"Checkpoint keys: {list(checkpoint.keys())}")
-                    self.G.load_state_dict(checkpoint['G'])
-                    log("Loaded model for generating sample")
+                        log("ERROR: Full model file (gan_full_model.pth) not found. Aborting.")
+                        raise FileNotFoundError("Full model file (gan_full_model.pth) not found.")
                 def generate_sample(self):
                     log("Calling G.eval() and generating image...")
                     self.G.eval()

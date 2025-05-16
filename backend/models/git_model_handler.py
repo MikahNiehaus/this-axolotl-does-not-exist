@@ -88,8 +88,9 @@ class GitModelHandler:
             
         success, _ = self._run_git_command(["ls-files", "--error-unmatch", self.model_path])
         return success
+    
     def add_model_file(self):
-        """Add the model file to Git"""
+        """Add the model file to Git and ensure LFS tracking"""
         if not os.path.exists(self.model_path):
             self.logger.error(f"Cannot add non-existent file: {self.model_path}")
             return False
@@ -101,6 +102,15 @@ class GitModelHandler:
             return False
             
         self.logger.info(f"Adding model file: {self.model_path} ({file_size:,} bytes)")
+        
+        # Ensure Git LFS is tracking this file type
+        ext = os.path.splitext(self.model_path)[1]
+        if ext in ['.pth', '.pt', '.h5', '.bin', '.onnx']:
+            lfs_track_cmd = ["lfs", "track", f"*{ext}"]
+            self.logger.info(f"Ensuring Git LFS is tracking '*{ext}'...")
+            self._run_git_command(lfs_track_cmd)
+            # Always add .gitattributes if changed
+            self._run_git_command(["add", ".gitattributes"])
             
         success, output = self._run_git_command(["add", self.model_path])
         if success:

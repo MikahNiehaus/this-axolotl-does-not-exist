@@ -22,12 +22,20 @@ backend/generated_axolotls/
 backend/data/**/*.pth
 backend/data/**/*.pt
 backend/data/**/*.h5
+backend/data/**/*.bin
+backend/data/**/*.onnx
 
 # Then make exceptions for model files we need for deployment
+# Critical GAN model files required by the application
 !backend/data/gan_checkpoint.pth
 !backend/data/gan_full_model.pth
 !backend/data/gan_samples/**
+
+# Other important model files
 !backend/data/best_diffusion_model.pth
+
+# For Git LFS tracking - ensure .gitattributes is not ignored
+!.gitattributes
 
 # Virtual environments
 .env

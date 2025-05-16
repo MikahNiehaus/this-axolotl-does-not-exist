@@ -1,11 +1,30 @@
-# Track binary model files with Git LFS 
+# Track all binary model files with Git LFS
 *.pth filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+*.h5 filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+
+# Explicitly track critical model files with Git LFS
 backend/data/gan_checkpoint.pth filter=lfs diff=lfs merge=lfs -text
+backend/data/gan_full_model.pth filter=lfs diff=lfs merge=lfs -text
 backend/data/best_diffusion_model.pth filter=lfs diff=lfs merge=lfs -text
 
 # Make sure these files are tracked even if they change
 backend/data/gan_checkpoint.pth -crlf
+backend/data/gan_full_model.pth -crlf
 backend/data/best_diffusion_model.pth -crlf
 
 # Ensure shell scripts use LF even on Windows
 *.sh text eol=lf
+
+# Standard text file configuration
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

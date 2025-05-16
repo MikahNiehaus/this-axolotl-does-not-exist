@@ -7,6 +7,8 @@ from PIL import Image
 from flask_cors import CORS
 import os
 import time
+import subprocess
+import sys
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
@@ -16,6 +18,21 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(SAMPLE_DIR, exist_ok=True)
+
+# === Model integrity check at startup ===
+VERIFY_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'verify_model_integrity.py')
+if os.path.exists(VERIFY_SCRIPT):
+    print("[STARTUP] Verifying model file integrity...")
+    result = subprocess.run([sys.executable, VERIFY_SCRIPT], capture_output=True, text=True)
+    print(result.stdout)
+    if result.returncode != 0:
+        print("[FATAL] Model file integrity check failed. Aborting startup.")
+        print(result.stderr)
+        sys.exit(1)
+    else:
+        print("[STARTUP] Model file integrity check passed.")
+else:
+    print(f"[WARN] Model integrity check script not found at {VERIFY_SCRIPT}. Skipping model check.")
 
 gan = AxolotlGenerator()
 

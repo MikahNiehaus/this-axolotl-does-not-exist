@@ -54,15 +54,36 @@ class AxolotlImageAPI:
                     log(f"Looking for checkpoint at: {CHECKPOINT_PATH}")
                     if os.path.exists(CHECKPOINT_PATH):
                         try:
-                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
-                        except TypeError as e:
-                            log(f"torch.load does not support weights_only argument (PyTorch <2.6?): {str(e)}. Retrying without it.")
                             checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                            log(f"Successfully loaded checkpoint file")
+                        except Exception as e:
+                            log(f"Error loading checkpoint: {str(e)}")
+                            return False
+                        
+                        # Check if checkpoint is a valid dictionary with 'G' key
+                        if not isinstance(checkpoint, dict):
+                            log(f"Error: Checkpoint is not a dictionary, got {type(checkpoint)}")
+                            return False
+                            
                         log(f"Checkpoint keys: {list(checkpoint.keys())}")
-                        self.G.load_state_dict(checkpoint['G'])
-                        log("Loaded checkpoint for generating sample")
+                        
+                        # Check for correct key
+                        if 'G' in checkpoint:
+                            # This is the expected format from train_gan.py
+                            self.G.load_state_dict(checkpoint['G'])
+                            log("Loaded checkpoint for generating sample")
+                            return True
+                        elif 'state_dict' in checkpoint:
+                            # Alternative format some frameworks might use
+                            self.G.load_state_dict(checkpoint['state_dict'])
+                            log("Loaded state_dict from checkpoint for generating sample")
+                            return True
+                        else:
+                            log(f"Error: Could not find model weights in checkpoint")
+                            return False
                     else:
                         log("No checkpoint found, using untrained generator")
+                        return False
                 def generate_sample(self):
                     log("Calling G.eval() and generating image...")
                     self.G.eval()

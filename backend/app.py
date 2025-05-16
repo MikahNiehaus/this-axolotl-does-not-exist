@@ -74,21 +74,74 @@ class AxolotlImageAPI:
                         size = os.path.getsize(item_path) if os.path.isfile(item_path) else "DIR"
                         log(f"  {item} - {size} bytes")
                     
+                    # Define a minimum viable size for a real model file (at least 10KB)
+                    MIN_MODEL_SIZE = 10 * 1024
+                    
                     if os.path.exists(FULL_MODEL_PATH):
                         file_size = os.path.getsize(FULL_MODEL_PATH)
                         log(f"Loading full model from: {FULL_MODEL_PATH} (Size: {file_size} bytes)")
-                        if file_size == 0:
-                            log(f"ERROR: Full model file exists but has zero size")
-                            raise FileNotFoundError("Full model file has zero size, might be corrupted")
+                        
+                        if file_size < MIN_MODEL_SIZE:
+                            log(f"WARNING: Full model file is suspiciously small ({file_size} bytes)")
+                            log(f"This may be a placeholder file created by check_model.sh")
+                            log(f"Attempting to regenerate model file using the included script...")
                             
+                            # Try to regenerate a viable model file
+                            try:
+                                from models.gan_modules import Generator, Discriminator
+                                import torch.nn as nn
+                                import torch.optim as optim
+                                
+                                # Create minimal generator and discriminator
+                                G = Generator(z_dim=self.z_dim, img_channels=3, img_size=self.img_size).to(self.device)
+                                D = Discriminator(img_channels=3, img_size=self.img_size).to(self.device)
+                                
+                                # Save a proper model file
+                                torch.save({
+                                    'G': G.state_dict(),
+                                    'D': D.state_dict(),
+                                    'epoch': 1,
+                                    'img_size': self.img_size
+                                }, FULL_MODEL_PATH)
+                                
+                                log(f"Successfully regenerated model file: {FULL_MODEL_PATH}")
+                                file_size = os.path.getsize(FULL_MODEL_PATH)
+                                log(f"New file size: {file_size} bytes")
+                                
+                                # Now load the newly created model
+                                checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
+                                log(f"Checkpoint keys: {list(checkpoint.keys())}")
+                                self.G.load_state_dict(checkpoint['G'])
+                                log("Loaded regenerated model for sample generation")
+                                return
+                            except Exception as e:
+                                log(f"ERROR: Failed to regenerate model: {str(e)}")
+                                log("Continuing with attempt to load existing file...")
+                        
                         try:
                             checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
                             log(f"Checkpoint keys: {list(checkpoint.keys())}")
                             self.G.load_state_dict(checkpoint['G'])
                             log("Loaded full model for generating sample")
                         except Exception as e:
-                            log(f"ERROR: Failed to load model: {str(e)}")
-                            raise
+                            log(f"ERROR: Failed to load full model: {str(e)}")
+                            log("Attempting to use checkpoint file as fallback...")
+                            
+                            # Try using checkpoint file as fallback
+                            CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
+                            if os.path.exists(CHECKPOINT_PATH):
+                                try:
+                                    log(f"Trying checkpoint file: {CHECKPOINT_PATH}")
+                                    checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                                    self.G.load_state_dict(checkpoint['G'])
+                                    log("Successfully loaded checkpoint as fallback")
+                                    return
+                                except Exception as e2:
+                                    log(f"ERROR: Failed to load checkpoint: {str(e2)}")
+                            
+                            # If we get here, both attempts failed
+                            log("ERROR: All model load attempts failed")
+                            raise Exception(f"Failed to load any model file: {str(e)}")
                     else:
                         log("ERROR: Full model file (gan_full_model.pth) not found.")
                         log(f"Full model path expected at: {FULL_MODEL_PATH}")

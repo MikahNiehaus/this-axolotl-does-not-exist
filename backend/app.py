@@ -36,9 +36,13 @@ class AxolotlImageAPI:
             log(f"torch version: {torch.__version__}")
             log(f"torchvision version: {__import__('torchvision').__version__}")
             log(f"numpy version: {np.__version__}")
-            DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+            # Make sure we resolve paths correctly - this is critical for Railway deployment
+            DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
             SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
             FULL_MODEL_PATH = os.path.join(DATA_DIR, 'gan_full_model.pth')
+            log(f"Resolved DATA_DIR: {DATA_DIR}")
+            log(f"Looking for model at: {FULL_MODEL_PATH}")
+            log(f"Does model file exist? {os.path.exists(FULL_MODEL_PATH)}")
             IMG_SIZE = 32
             Z_DIM = 100
             DEVICE = torch.device('cpu')
@@ -51,14 +55,45 @@ class AxolotlImageAPI:
                     self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
                     self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
                 def load_model(self):
+                    log(f"Checking file system details:")
+                    if not os.path.exists(DATA_DIR):
+                        log(f"ERROR: Data directory does not exist at: {DATA_DIR}")
+                        # Try to list the parent directory to debug
+                        parent_dir = os.path.dirname(DATA_DIR)
+                        if os.path.exists(parent_dir):
+                            log(f"Contents of parent directory {parent_dir}:")
+                            for item in os.listdir(parent_dir):
+                                log(f"  {item}")
+                        else:
+                            log(f"Parent directory {parent_dir} does not exist")
+                        raise FileNotFoundError(f"Data directory not found at {DATA_DIR}")
+                        
+                    log(f"Contents of data directory {DATA_DIR}:")
+                    for item in os.listdir(DATA_DIR):
+                        item_path = os.path.join(DATA_DIR, item)
+                        size = os.path.getsize(item_path) if os.path.isfile(item_path) else "DIR"
+                        log(f"  {item} - {size} bytes")
+                    
                     if os.path.exists(FULL_MODEL_PATH):
-                        log(f"Loading full model from: {FULL_MODEL_PATH}")
-                        checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
-                        log(f"Checkpoint keys: {list(checkpoint.keys())}")
-                        self.G.load_state_dict(checkpoint['G'])
-                        log("Loaded model for generating sample")
+                        file_size = os.path.getsize(FULL_MODEL_PATH)
+                        log(f"Loading full model from: {FULL_MODEL_PATH} (Size: {file_size} bytes)")
+                        if file_size == 0:
+                            log(f"ERROR: Full model file exists but has zero size")
+                            raise FileNotFoundError("Full model file has zero size, might be corrupted")
+                            
+                        try:
+                            checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
+                            log(f"Checkpoint keys: {list(checkpoint.keys())}")
+                            self.G.load_state_dict(checkpoint['G'])
+                            log("Loaded full model for generating sample")
+                        except Exception as e:
+                            log(f"ERROR: Failed to load model: {str(e)}")
+                            raise
                     else:
-                        log("ERROR: Full model file (gan_full_model.pth) not found. Aborting.")
+                        log("ERROR: Full model file (gan_full_model.pth) not found.")
+                        log(f"Full model path expected at: {FULL_MODEL_PATH}")
+                        log("This file is created automatically every 1000 epochs during training.")
+                        log("Make sure train_gan.py has run for at least 1000 epochs.")
                         raise FileNotFoundError("Full model file (gan_full_model.pth) not found.")
                 def generate_sample(self):
                     log("Calling G.eval() and generating image...")

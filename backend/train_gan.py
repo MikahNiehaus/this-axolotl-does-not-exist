@@ -19,7 +19,8 @@ else:
     print("[INFO] Using CPU")
 
 # --- CONFIG ---
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+# Use absolute path to avoid path resolution issues
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
 IMG_SIZE = 32  # Start small, change this to upscale later
@@ -30,6 +31,9 @@ Z_DIM = 100
 CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
 SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
 FULL_MODEL_PATH = os.path.join(DATA_DIR, 'gan_full_model.pth')
+print(f"[PATHS] DATA_DIR: {DATA_DIR}")
+print(f"[PATHS] CHECKPOINT_PATH: {CHECKPOINT_PATH}")
+print(f"[PATHS] FULL_MODEL_PATH: {FULL_MODEL_PATH}")
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 SAMPLE_INTERVAL = 100
 
@@ -238,6 +242,13 @@ class GANTrainer:
 
     def save_full_model(self, epoch, manual=False):
         """Save the full model (not just checkpoint) and push to Git"""
+        # Ensure data directory exists
+        os.makedirs(DATA_DIR, exist_ok=True)
+        
+        # Make sure we're using absolute paths
+        full_model_abs_path = os.path.abspath(FULL_MODEL_PATH)
+        print(f"[FullModel] Saving full model to: {full_model_abs_path}")
+        
         # Save the full model (generator, discriminator, optimizer states, etc.)
         torch.save({
             'G': self.G.state_dict(),
@@ -246,8 +257,12 @@ class GANTrainer:
             'opt_D': self.opt_D.state_dict(),
             'epoch': epoch,
             'img_size': self.img_size
-        }, FULL_MODEL_PATH)
-        print(f"[FullModel] Saved full model at epoch {epoch+1} to {FULL_MODEL_PATH}")
+        }, full_model_abs_path)
+        
+        # Verify the file was created
+        if os.path.exists(full_model_abs_path):
+            file_size = os.path.getsize(full_model_abs_path)
+            print(f"[FullModel] Saved full model at epoch {epoch+1} to {full_model_abs_path} (Size: {file_size} bytes)")
         # Push only the full model to git
         if self.git_enabled:
             try:
@@ -445,7 +460,9 @@ class GANTrainer:
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()
                         save_image(fake, os.path.join(SAMPLE_DIR, 'sample_epochmanual.png'), normalize=True)
                     self.G.train()
-                if (epoch + 1) % self.git_push_interval == 0:
+                
+                # Create full model file at epoch 1 and then every git_push_interval epochs
+                if (epoch + 1) == 1 or (epoch + 1) % self.git_push_interval == 0:
                     self.save_full_model(epoch)
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch

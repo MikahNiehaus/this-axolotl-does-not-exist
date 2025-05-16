@@ -14,17 +14,18 @@ backend/data/train/
 backend/data/test/
 backend/data/axolotl_scraped/
 backend/data/Axolotl/
-backend/data/diffusion_checkpoint.pth
-backend/data/diffusion_model_epoch*.pth
+
 backend/kaggle.json
 backend/generated_axolotls/
 
-# Ensure model files are not ignored
-*.pth
-*.pt
-*.h5
-# Exception for model files we need for deployment
+# First ignore all model files
+backend/data/**/*.pth
+backend/data/**/*.pt
+backend/data/**/*.h5
+
+# Then make exceptions for model files we need for deployment
 !backend/data/gan_checkpoint.pth
+!backend/data/gan_full_model.pth
 !backend/data/gan_samples/**
 !backend/data/best_diffusion_model.pth
 

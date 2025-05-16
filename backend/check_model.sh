@@ -23,73 +23,24 @@ fi
 # Check both full model and checkpoint file
 FULL_MODEL_PATH="$DATA_DIR/gan_full_model.pth"
 
-create_viable_model() {
-    local target_file=$1
-    echo "Creating a minimal viable model file at $target_file"
-    
-    # This creates a real but tiny GAN model that can actually be loaded
-    # Much better than just an empty dict which causes "invalid load key" errors
-    python -c "
-import torch
-import torch.nn as nn
+MIN_MODEL_SIZE=1000000  # 1MB minimum size for a real model
 
-# Create minimal but loadable generator
-class SimpleGenerator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(100, 256),
-            nn.ReLU(),
-            nn.Linear(256, 3*32*32),
-            nn.Tanh()
-        )
-
-    def forward(self, x):
-        return self.model(x).view(-1, 3, 32, 32)
-
-# Create minimal discriminator
-class SimpleDiscriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(3*32*32, 256),
-            nn.LeakyReLU(0.2),
-            nn.Linear(256, 1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        return self.model(x)
-
-# Create and save dummy model
-G = SimpleGenerator()
-D = SimpleDiscriminator()
-torch.save({
-    'G': G.state_dict(),
-    'D': D.state_dict(),
-    'epoch': 1,
-    'img_size': 32
-}, '$target_file')
-"
+check_model_file() {
+    local file=$1
+    if [ ! -f "$file" ]; then
+        echo "❌ ERROR: Required model file $file is missing. Please provide a full-size, valid model."
+        exit 1
+    fi
+    local size=$(stat -c%s "$file" 2>/dev/null || wc -c < "$file")
+    if [ "$size" -lt "$MIN_MODEL_SIZE" ]; then
+        echo "❌ ERROR: Model file $file is too small ($size bytes). Refusing to use a placeholder or corrupted model."
+        exit 1
+    fi
+    echo "✅ Model file $file exists and is $size bytes."
 }
 
-if [ ! -f "$FULL_MODEL_PATH" ]; then
-    echo "GAN full model not found. Setting up a minimal viable model."
-    create_viable_model "$FULL_MODEL_PATH"
-    
-    # Also create checkpoint if it doesn't exist
-    if [ ! -f "$CHECKPOINT_PATH" ]; then
-        echo "Also creating checkpoint model"
-        cp "$FULL_MODEL_PATH" "$CHECKPOINT_PATH"
-    fi
-elif [ ! -f "$CHECKPOINT_PATH" ]; then
-    echo "Full model exists but checkpoint doesn't. Setting up checkpoint."
-    cp "$FULL_MODEL_PATH" "$CHECKPOINT_PATH"
-else
-    echo "Using existing model files:"
-    echo "- Full model: $FULL_MODEL_PATH"
-    echo "- Checkpoint: $CHECKPOINT_PATH"
-fi
+# Check both full model and checkpoint file
+check_model_file "$FULL_MODEL_PATH"
+check_model_file "$CHECKPOINT_PATH"
 
 echo "Model check complete."

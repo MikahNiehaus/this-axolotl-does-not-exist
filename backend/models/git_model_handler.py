@@ -88,12 +88,19 @@ class GitModelHandler:
             
         success, _ = self._run_git_command(["ls-files", "--error-unmatch", self.model_path])
         return success
-    
     def add_model_file(self):
         """Add the model file to Git"""
         if not os.path.exists(self.model_path):
             self.logger.error(f"Cannot add non-existent file: {self.model_path}")
             return False
+        
+        # Check file size to ensure it's not empty
+        file_size = os.path.getsize(self.model_path)
+        if file_size == 0:
+            self.logger.error(f"Cannot add empty file (0 bytes): {self.model_path}")
+            return False
+            
+        self.logger.info(f"Adding model file: {self.model_path} ({file_size:,} bytes)")
             
         success, output = self._run_git_command(["add", self.model_path])
         if success:

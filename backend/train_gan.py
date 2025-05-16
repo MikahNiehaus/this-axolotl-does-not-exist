@@ -128,6 +128,13 @@ class GANTrainer:
         else:
             print("[GIT] Git integration disabled - Git not available or not in a Git repository")
         
+        self.resolution_history = []  # Track all resolutions and epochs
+        print("[SUMMARY] GANTrainer will:")
+        print(" - Log the current image resolution at every epoch and checkpoint.")
+        print(" - Continuously increase resolution on overfitting.")
+        print(" - Increase checkpointing if VRAM runs out.")
+        print(" - Save a full model and keep a history of all checkpoint epochs and resolutions.")
+        
     def _check_git_available(self):
         """Check if Git is available and we're in a Git repository"""
         try:
@@ -161,6 +168,7 @@ class GANTrainer:
         self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
         self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
+        print(f"[RESOLUTION] New training resolution: {self.img_size}x{self.img_size}")
         return True
 
     def enable_gradient_checkpointing(self):
@@ -239,6 +247,10 @@ class GANTrainer:
             print(f"[ERROR] Failed to save checkpoint: {str(e)}")
             if os.path.exists(temp_checkpoint_path):
                 os.remove(temp_checkpoint_path)
+        
+        # Log resolution history
+        self.resolution_history.append({'epoch': epoch+1, 'img_size': self.img_size})
+        print(f"[CHECKPOINT] Epoch {epoch+1} | Resolution: {self.img_size}x{self.img_size}")
 
     def save_full_model(self, epoch, manual=False):
         """Save the full model (not just checkpoint) and push to Git"""
@@ -256,7 +268,8 @@ class GANTrainer:
             'opt_G': self.opt_G.state_dict(),
             'opt_D': self.opt_D.state_dict(),
             'epoch': epoch,
-            'img_size': self.img_size
+            'img_size': self.img_size,
+            'resolution_history': self.resolution_history
         }, full_model_abs_path)
         
         # Verify the file was created
@@ -417,7 +430,7 @@ class GANTrainer:
                     pbar.set_postfix({"D_loss": loss_D.item(), "G_loss": loss_G.item()})
                 avg_D_loss = sum(D_losses) / len(D_losses)
                 avg_G_loss = sum(G_losses) / len(G_losses)
-                print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss:.4f} | G_loss: {avg_G_loss:.4f}")
+                print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss:.4f} | G_loss: {avg_G_loss:.4f} | Resolution: {self.img_size}x{self.img_size}")
                 # Overfitting/no-improvement heuristic
                 if prev_G_loss is not None and avg_G_loss >= prev_G_loss:
                     no_improve += 1
@@ -516,7 +529,7 @@ if __name__ == '__main__':
                     trainer.generate_sample('manual_cpu')
                     print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual_cpu.png')}")
             else:
-                print(f"[ERROR] Failed to generate sample: {str(e)}")
+                print(f"[ERROR] Failed to generate sample: {e}")
     elif args.command == 'save_full_model':
         trainer.load_checkpoint()
         trainer.save_full_model(trainer.start_epoch, manual=True)

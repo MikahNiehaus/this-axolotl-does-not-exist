@@ -58,7 +58,7 @@ LEARNING_RATE = 1e-4  # Reduced from 2e-4 for more stable training
 WEIGHT_DECAY = 1e-5   # Add weight decay for regularization
 VALIDATION_SPLIT = 0.1  # Percentage of data to use for validation
 GRADIENT_CLIP_VALUE = 1.0  # Gradient clipping to prevent exploding gradients
-PATIENCE = 10  # Patience for early stopping and learning rate reduction
+PATIENCE = 5  # Patience for early stopping and learning rate reduction
 # If not vram-friendly, use full images for both patch and full
 import sys
 if '--vram-friendly' not in sys.argv:

@@ -23,7 +23,7 @@ else:
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
-IMG_SIZE = 32  # Start small, change this to upscale later
+IMG_SIZE = 480  # Always train at 480p
 BATCH_SIZE = 32
 EPOCHS = 10000
 LEARNING_RATE = 2e-4
@@ -94,23 +94,23 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_la
 
 # --- GAN TRAINER CLASS ---
 class GANTrainer:
-    def __init__(self, img_size=32, z_dim=100, lr=2e-4, batch_size=32, device='cpu'):
-        self.img_size = img_size
+    def __init__(self, img_size=480, z_dim=100, lr=2e-4, batch_size=32, device='cpu'):
+        self.img_size = 480  # Always force 480p
         self.z_dim = z_dim
         self.device = device
-        self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
-        self.D = Discriminator(img_channels=3, img_size=img_size).to(device)
+        self.G = Generator(z_dim=z_dim, img_channels=3, img_size=480).to(device)
+        self.D = Discriminator(img_channels=3, img_size=480).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
         self.criterion = nn.BCELoss()
         self.start_epoch = 0
         self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
         self.overfit_counter = 0
-        self.overfit_patience = 10  # Number of epochs to tolerate no improvement before upscaling
+        self.overfit_patience = 20  # Number of epochs to tolerate no improvement before stopping
         self.last_D_losses = []
         self.last_G_losses = []
-        self.upscale_factor = 2  # Double the image size on each upscale
-        self.max_img_size = 128  # Maximum image size for upscaling
+        self.upscale_factor = 1  # No upscaling
+        self.max_img_size = 480  # Never increase above 480
         self.checkpointing_level = 0  # For VRAM fallback
         
         # Initialize the Git model handler for automatic pushes
@@ -151,25 +151,9 @@ class GANTrainer:
             return False
 
     def upscale(self):
-        new_size = min(self.img_size * self.upscale_factor, self.max_img_size)
-        if new_size == self.img_size:
-            print("[INFO] Already at max image size. Continuing with quality improvements.")
-            # Refresh the model parameters to break out of local minima without changing resolution
-            self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE * 0.8, betas=(0.5, 0.999))
-            self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE * 0.8, betas=(0.5, 0.999))
-            # Still return True to reset no_improve counter and continue training
-            return True
-            
-        print(f"[INFO] Upscaling GAN from {self.img_size} to {new_size}.")
-        # Recreate Generator and Discriminator with new size
-        self.img_size = new_size
-        self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=new_size).to(self.device)
-        self.D = Discriminator(img_channels=3, img_size=new_size).to(self.device)
-        self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-        self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-        self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
-        print(f"[RESOLUTION] New training resolution: {self.img_size}x{self.img_size}")
-        return True
+        # Never upscale, always return False
+        print("[INFO] Upscaling disabled. Sticking to 180p.")
+        return False
 
     def enable_gradient_checkpointing(self):
         """Enable gradient checkpointing to save VRAM memory at the cost of computation speed"""
@@ -290,32 +274,20 @@ class GANTrainer:
         if os.path.exists(CHECKPOINT_PATH):
             try:
                 checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
-                
-                # Check if the checkpoint has a different image size 
-                saved_img_size = checkpoint.get('img_size', self.img_size)
-                if saved_img_size != self.img_size:
-                    print(f"[INFO] Checkpoint has image size {saved_img_size}, current is {self.img_size}")
-                    print(f"[INFO] Recreating models with saved image size {saved_img_size}")
-                    # Recreate models with correct size
-                    self.img_size = saved_img_size
-                    self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=saved_img_size).to(self.device)
-                    self.D = Discriminator(img_channels=3, img_size=saved_img_size).to(self.device)
-                    self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-                    self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-                    self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
-                
-                # Load state dictionaries
+                # Ignore checkpoint img_size, always use 480
+                self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=480).to(self.device)
+                self.D = Discriminator(img_channels=3, img_size=480).to(self.device)
+                self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                 self.G.load_state_dict(checkpoint['G'])
                 self.D.load_state_dict(checkpoint['D'])
                 self.opt_G.load_state_dict(checkpoint['opt_G'])
                 self.opt_D.load_state_dict(checkpoint['opt_D'])
-                
-                # Make sure gradient checkpointing is disabled for loaded models initially
                 if hasattr(self.G, 'gradient_checkpointing_disable'):
                     self.G.gradient_checkpointing_disable()
                 if hasattr(self.D, 'gradient_checkpointing_disable'):
                     self.D.gradient_checkpointing_disable()
-                
                 self.start_epoch = checkpoint['epoch'] + 1
                 print(f"[INFO] Successfully loaded checkpoint from {CHECKPOINT_PATH} at epoch {self.start_epoch}")
             except Exception as e:
@@ -327,6 +299,7 @@ class GANTrainer:
 
     def generate_sample(self, epoch):
         """Generate a sample using VRAM-safe approach"""
+        import torch.nn.functional as F
         try:
             # Set eval mode and disable checkpointing to ensure clean output
             self.G.eval()
@@ -341,8 +314,8 @@ class GANTrainer:
                 # Generate a grid of samples and overwrite the same file
                 try:
                     torch.cuda.empty_cache()  # Clear memory first
-                    fake = self.G(self.fixed_noise).detach().cpu()
-                    save_image(fake, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True, nrow=4)
+                    fake_grid = self.G(self.fixed_noise).detach().cpu()
+                    save_image(fake_grid, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True, nrow=4)
                 except RuntimeError as e:
                     if 'CUDA out of memory' in str(e):
                         print("[VRAM] Grid sample generation skipped due to memory constraints")
@@ -376,6 +349,7 @@ class GANTrainer:
         no_improve = 0
         prev_G_loss = None
         vram_retry = 0
+        max_epochs = 20000
         while True:
             try:
                 D_losses = []
@@ -434,34 +408,13 @@ class GANTrainer:
                 # Overfitting/no-improvement heuristic
                 if prev_G_loss is not None and avg_G_loss >= prev_G_loss:
                     no_improve += 1
-                    print(f"[No improvement] {no_improve}/10 epochs.")
+                    print(f"[No improvement] {no_improve}/{self.overfit_patience} epochs.")
                 else:
                     no_improve = 0
                 prev_G_loss = avg_G_loss
                 if no_improve >= self.overfit_patience:
-                    print(f"[INFO] No improvement for {self.overfit_patience} epochs. Attempting to upscale.")
-                    if self.upscale():
-                        # Update transform and dataloader for new image size
-                        global transform, train_ds
-                        transform = transforms.Compose([
-                            transforms.Resize((self.img_size, self.img_size)),
-                            transforms.RandomHorizontalFlip(),
-                            transforms.RandomVerticalFlip(),
-                            # Use fill=1 to fill with white instead of black during rotation and prevent black artifacts
-                            transforms.RandomRotation(20, fill=1),
-                            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-                            # Limit shear to prevent black edges
-                            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.95, 1.05), shear=5, fill=1),
-                            transforms.ToTensor(),
-                            transforms.Normalize([0.5]*3, [0.5]*3)
-                        ])
-                        train_ds = AxolotlDataset(TRAIN_DIR, transform)
-                        local_train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
-                        no_improve = 0
-                        continue  # Restart training at new resolution
-                    else:
-                        print("[INFO] Max image size reached. Continuing training at current resolution.")
-                        no_improve = 0
+                    print(f"[INFO] No improvement for {self.overfit_patience} epochs. Stopping training.")
+                    break  # Stop training instead of upscaling
                 if (epoch + 1) % sample_interval == 0 or epoch == 0:
                     print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)
@@ -479,6 +432,9 @@ class GANTrainer:
                     self.save_full_model(epoch)
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch
+                if epoch >= max_epochs:
+                    print(f"[INFO] Reached max epochs ({max_epochs}). Stopping training.")
+                    break
             except RuntimeError as e:
                 if 'CUDA out of memory' in str(e):
                     print(f"[VRAM] CUDA out of memory detected. Attempting VRAM fallback (attempt {vram_retry+1}/10)...")

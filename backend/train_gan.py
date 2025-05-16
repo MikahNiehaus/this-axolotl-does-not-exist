@@ -113,20 +113,14 @@ class GANTrainer:
         self.max_img_size = 480  # Never increase above 480
         self.checkpointing_level = 0  # For VRAM fallback
         
-        # Initialize the Git model handler for automatic pushes
-        self.git_push_interval = 1000  # Push to Git every 1000 epochs
-        
-        # Set up Git integration if possible
-        self.git_enabled = self._check_git_available()
-        if self.git_enabled:
-            try:
-                self.git_handler = GitModelHandler(CHECKPOINT_PATH)
-                print(f"[GIT] Git integration enabled - Model will be pushed to main branch every {self.git_push_interval} epochs")
-            except Exception as e:
-                print(f"[GIT] Warning: Could not initialize Git handler: {str(e)}")
-                self.git_enabled = False
-        else:
-            print("[GIT] Git integration disabled - Git not available or not in a Git repository")
+        # --- Disable Git integration ---
+        self.git_enabled = False
+        # self.git_push_interval = 1000  # (Optional: can keep for future use)
+        # self.git_handler = None
+        print("[GIT] Git integration forcibly disabled by user request.")
+        self.git_push_interval = 1000  # (still used for full model, but not for checkpoint)
+        self.sample_interval = 100  # Make checkpoint every 100 epochs
+        # ...existing code...
         
         self.resolution_history = []  # Track all resolutions and epochs
         print("[SUMMARY] GANTrainer will:")
@@ -220,13 +214,13 @@ class GANTrainer:
             print(f"[Checkpoint] Saved checkpoint at epoch {epoch+1}")
                 
             # Push to Git every git_push_interval epochs
-            if self.git_enabled and (epoch + 1) % self.git_push_interval == 0:
-                print(f"[GIT] Pushing model checkpoint at epoch {epoch+1} to Git main branch...")
-                try:
-                    self.git_handler.update_model_in_git(epoch_num=epoch+1)
-                except Exception as e:
-                    print(f"[GIT] Warning: Failed to push model to Git: {str(e)}")
-                    print("[GIT] Continuing training without Git push")
+            # if self.git_enabled and (epoch + 1) % self.git_push_interval == 0:
+            #     print(f"[GIT] Pushing model checkpoint at epoch {epoch+1} to Git main branch...")
+            #     try:
+            #         self.git_handler.update_model_in_git(epoch_num=epoch+1)
+            #     except Exception as e:
+            #         print(f"[GIT] Warning: Failed to push model to Git: {str(e)}")
+            #         print("[GIT] Continuing training without Git push")
         except Exception as e:
             print(f"[ERROR] Failed to save checkpoint: {str(e)}")
             if os.path.exists(temp_checkpoint_path):
@@ -261,14 +255,14 @@ class GANTrainer:
             file_size = os.path.getsize(full_model_abs_path)
             print(f"[FullModel] Saved full model at epoch {epoch+1} to {full_model_abs_path} (Size: {file_size} bytes)")
         # Push only the full model to git
-        if self.git_enabled:
-            try:
-                handler = GitModelHandler(FULL_MODEL_PATH)
-                comment = f"Full GAN model at epoch {epoch+1}" if not manual else "Manual full GAN model save"
-                handler.update_model_in_git(epoch_num=epoch+1)
-                print(f"[GIT] Pushed full model to Git with comment: {comment}")
-            except Exception as e:
-                print(f"[GIT] Warning: Failed to push full model to Git: {str(e)}")
+        # if self.git_enabled:
+        #     try:
+        #         handler = GitModelHandler(FULL_MODEL_PATH)
+        #         comment = f"Full GAN model at epoch {epoch+1}" if not manual else "Manual full GAN model save"
+        #         handler.update_model_in_git(epoch_num=epoch+1)
+        #         print(f"[GIT] Pushed full model to Git with comment: {comment}")
+        #     except Exception as e:
+        #         print(f"[GIT] Warning: Failed to push full model to Git: {str(e)}")
 
     def load_checkpoint(self):
         if os.path.exists(CHECKPOINT_PATH):
@@ -415,7 +409,7 @@ class GANTrainer:
                 if no_improve >= self.overfit_patience:
                     print(f"[INFO] No improvement for {self.overfit_patience} epochs. Stopping training.")
                     break  # Stop training instead of upscaling
-                if (epoch + 1) % sample_interval == 0 or epoch == 0:
+                if (epoch + 1) % self.sample_interval == 0 or epoch == 0:
                     print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)
                     self.save_checkpoint(epoch)
@@ -427,8 +421,8 @@ class GANTrainer:
                         save_image(fake, os.path.join(SAMPLE_DIR, 'sample_epochmanual.png'), normalize=True)
                     self.G.train()
                 
-                # Create full model file at epoch 1 and then every git_push_interval epochs
-                if (epoch + 1) == 1 or (epoch + 1) % self.git_push_interval == 0:
+                # Create full model file every git_push_interval epochs only
+                if (epoch + 1) % self.git_push_interval == 0:
                     self.save_full_model(epoch)
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch

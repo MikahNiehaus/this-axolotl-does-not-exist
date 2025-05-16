@@ -60,27 +60,75 @@ class AxolotlImageAPI:
                             log(f"Error loading checkpoint: {str(e)}")
                             return False
                         
-                        # Check if checkpoint is a valid dictionary with 'G' key
+                        # Check if checkpoint is a valid dictionary
                         if not isinstance(checkpoint, dict):
                             log(f"Error: Checkpoint is not a dictionary, got {type(checkpoint)}")
                             return False
-                            
+                        
                         log(f"Checkpoint keys: {list(checkpoint.keys())}")
                         
-                        # Check for correct key
+                        # Check for different possible key formats
+                        # Handle different model checkpoint key formats
                         if 'G' in checkpoint:
                             # This is the expected format from train_gan.py
-                            self.G.load_state_dict(checkpoint['G'])
-                            log("Loaded checkpoint for generating sample")
-                            return True
+                            try:
+                                self.G.load_state_dict(checkpoint['G'])
+                                log("Loaded 'G' key from checkpoint")
+                                return True
+                            except Exception as e:
+                                log(f"Error loading 'G' state dict: {str(e)}. Trying to adapt keys...")
+                                try:
+                                    # Try to adapt the state dict to match the model
+                                    state_dict = checkpoint['G']
+                                    # Clean keys by removing module. prefix if it exists
+                                    clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+                                    # Try a flexible loading approach
+                                    model_dict = self.G.state_dict()
+                                    # Filter out keys that don't match the model
+                                    filtered_dict = {k: v for k, v in clean_state_dict.items() if k in model_dict}
+                                    missing = [k for k in model_dict.keys() if k not in filtered_dict]
+                                    if missing:
+                                        log(f"Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+                                    self.G.load_state_dict(filtered_dict, strict=False)
+                                    log("Loaded partial model from 'G' key with flexible loading")
+                                    return True
+                                except Exception as e2:
+                                    log(f"Error with flexible loading: {str(e2)}")
+                        elif 'model_G' in checkpoint:
+                            try:
+                                self.G.load_state_dict(checkpoint['model_G'])
+                                log("Loaded 'model_G' key from checkpoint")
+                                return True
+                            except Exception as e:
+                                log(f"Error loading 'model_G' state dict: {str(e)}")
+                        elif 'generator' in checkpoint:
+                            try:
+                                self.G.load_state_dict(checkpoint['generator'])
+                                log("Loaded 'generator' key from checkpoint")
+                                return True
+                            except Exception as e:
+                                log(f"Error loading 'generator' state dict: {str(e)}")
                         elif 'state_dict' in checkpoint:
-                            # Alternative format some frameworks might use
-                            self.G.load_state_dict(checkpoint['state_dict'])
-                            log("Loaded state_dict from checkpoint for generating sample")
-                            return True
-                        else:
-                            log(f"Error: Could not find model weights in checkpoint")
-                            return False
+                            try:
+                                self.G.load_state_dict(checkpoint['state_dict'])
+                                log("Loaded 'state_dict' key from checkpoint")
+                                return True
+                            except Exception as e:
+                                log(f"Error loading 'state_dict': {str(e)}")
+                        
+                        # Last resort: try all keys that might contain state dictionaries
+                        for key in checkpoint.keys():
+                            if isinstance(checkpoint[key], dict) and 'weight' in str(checkpoint[key].keys()):
+                                try:
+                                    self.G.load_state_dict(checkpoint[key], strict=False)
+                                    log(f"Loaded weights from key '{key}' as best effort")
+                                    return True
+                                except Exception as e:
+                                    log(f"Failed to load weights from key '{key}': {str(e)}")
+                        
+                        # If we reach here, no suitable keys were found
+                        log(f"Error: Could not find compatible model weights in checkpoint")
+                        return False
                     else:
                         log("No checkpoint found, using untrained generator")
                         return False

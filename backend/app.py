@@ -38,6 +38,7 @@ class AxolotlImageAPI:
             log(f"numpy version: {np.__version__}")
             DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
             SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
+            FULL_MODEL_PATH = os.path.join(DATA_DIR, 'gan_full_model.pth')
             CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
             IMG_SIZE = 32
             Z_DIM = 100
@@ -50,19 +51,20 @@ class AxolotlImageAPI:
                     self.device = device
                     self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
                     self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
-                def load_checkpoint(self):
-                    log(f"Looking for checkpoint at: {CHECKPOINT_PATH}")
-                    if os.path.exists(CHECKPOINT_PATH):
-                        try:
-                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
-                        except TypeError as e:
-                            log(f"torch.load does not support weights_only argument (PyTorch <2.6?): {str(e)}. Retrying without it.")
-                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
-                        log(f"Checkpoint keys: {list(checkpoint.keys())}")
-                        self.G.load_state_dict(checkpoint['G'])
-                        log("Loaded checkpoint for generating sample")
+                def load_model(self):
+                    # Prefer full model if available
+                    if os.path.exists(FULL_MODEL_PATH):
+                        log(f"Loading full model from: {FULL_MODEL_PATH}")
+                        checkpoint = torch.load(FULL_MODEL_PATH, map_location=self.device)
+                    elif os.path.exists(CHECKPOINT_PATH):
+                        log(f"Loading checkpoint from: {CHECKPOINT_PATH}")
+                        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
                     else:
-                        log("No checkpoint found, using untrained generator")
+                        log("No model file found, using untrained generator")
+                        return
+                    log(f"Checkpoint keys: {list(checkpoint.keys())}")
+                    self.G.load_state_dict(checkpoint['G'])
+                    log("Loaded model for generating sample")
                 def generate_sample(self):
                     log("Calling G.eval() and generating image...")
                     self.G.eval()
@@ -75,7 +77,7 @@ class AxolotlImageAPI:
                         log("Image saved to buffer and ready to encode.")
                         return buffer.getvalue()
             trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)
-            trainer.load_checkpoint()
+            trainer.load_model()
             img_bytes = trainer.generate_sample()
             log("Image generation complete, encoding to base64...")
             img_str = base64.b64encode(img_bytes).decode("utf-8")

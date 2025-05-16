@@ -916,7 +916,7 @@ def train(resolution_scale=GRADIENT_RES_SCALE, continue_training=True):
             try:
                 sample_image(
                     model=model,  # Pass model directly to avoid loading from disk
-                    out_path=os.path.join(DATA_DIR, f'sample_epoch{start_epoch+1}.png'),
+                    out_path=os.path.join(DATA_DIR, f'sample_epoch.png'),
                     steps=250,
                     resolution_scale=RESOLUTION_SCALE,
                     betas=betas,

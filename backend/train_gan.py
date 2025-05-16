@@ -29,6 +29,7 @@ LEARNING_RATE = 2e-4
 Z_DIM = 100
 CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
 SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
+FULL_MODEL_PATH = os.path.join(DATA_DIR, 'gan_full_model.pth')
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 SAMPLE_INTERVAL = 100
 
@@ -235,6 +236,28 @@ class GANTrainer:
             if os.path.exists(temp_checkpoint_path):
                 os.remove(temp_checkpoint_path)
 
+    def save_full_model(self, epoch, manual=False):
+        """Save the full model (not just checkpoint) and push to Git"""
+        # Save the full model (generator, discriminator, optimizer states, etc.)
+        torch.save({
+            'G': self.G.state_dict(),
+            'D': self.D.state_dict(),
+            'opt_G': self.opt_G.state_dict(),
+            'opt_D': self.opt_D.state_dict(),
+            'epoch': epoch,
+            'img_size': self.img_size
+        }, FULL_MODEL_PATH)
+        print(f"[FullModel] Saved full model at epoch {epoch+1} to {FULL_MODEL_PATH}")
+        # Push only the full model to git
+        if self.git_enabled:
+            try:
+                handler = GitModelHandler(FULL_MODEL_PATH)
+                comment = f"Full GAN model at epoch {epoch+1}" if not manual else "Manual full GAN model save"
+                handler.update_model_in_git(epoch_num=epoch+1)
+                print(f"[GIT] Pushed full model to Git with comment: {comment}")
+            except Exception as e:
+                print(f"[GIT] Warning: Failed to push full model to Git: {str(e)}")
+
     def load_checkpoint(self):
         if os.path.exists(CHECKPOINT_PATH):
             try:
@@ -285,7 +308,7 @@ class GANTrainer:
             # Generate single image first (smaller memory footprint)
             with torch.no_grad():
                 fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch{epoch}.png'), normalize=True)
+                save_image(fake, os.path.join(SAMPLE_DIR, f'sample_epoch.png'), normalize=True)
 
                 # Generate a grid of samples and overwrite the same file
                 try:
@@ -422,6 +445,8 @@ class GANTrainer:
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()
                         save_image(fake, os.path.join(SAMPLE_DIR, 'sample_epochmanual.png'), normalize=True)
                     self.G.train()
+                if (epoch + 1) % self.git_push_interval == 0:
+                    self.save_full_model(epoch)
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch
             except RuntimeError as e:
@@ -444,7 +469,7 @@ class GANTrainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train GAN or generate a sample image.')
-    parser.add_argument('command', nargs='?', default='train', choices=['train', 'sample'], help="'train' to train, 'sample' to generate a sample image only")
+    parser.add_argument('command', nargs='?', default='train', choices=['train', 'sample', 'save_full_model'], help="'train' to train, 'sample' to generate a sample image only, 'save_full_model' to manually save and push full model")
     args = parser.parse_args()
 
     print(f"Using device: {DEVICE}")
@@ -475,5 +500,8 @@ if __name__ == '__main__':
                     print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual_cpu.png')}")
             else:
                 print(f"[ERROR] Failed to generate sample: {str(e)}")
+    elif args.command == 'save_full_model':
+        trainer.load_checkpoint()
+        trainer.save_full_model(trainer.start_epoch, manual=True)
     else:
         trainer.train(train_loader, epochs=EPOCHS, sample_interval=SAMPLE_INTERVAL)

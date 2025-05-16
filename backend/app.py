@@ -82,31 +82,8 @@ class AxolotlImageAPI:
             log("Image base64 encoding complete.")
             return img_str, logs
         except Exception as e:
-            log(f"PyTorch GAN failed, falling back to Keras: {str(e)}")
-            try:
-                noise = np.random.normal(0, 1, (1, gan.input_shape[0]))
-                img_arr = gan.generate_image(noise)
-                if isinstance(img_arr, list) or len(img_arr.shape) == 4:
-                    img_arr = img_arr[0]
-                img_arr = ((img_arr + 1) * 127.5).clip(0, 255).astype(np.uint8)
-                try:
-                    img_arr = img_arr.reshape(gan.img_shape)
-                except Exception:
-                    flat = img_arr.flatten()
-                    side = int(np.ceil(np.sqrt(flat.size / 3)))
-                    pad = side * side * 3 - flat.size
-                    if pad > 0:
-                        flat = np.pad(flat, (0, pad), mode='constant', constant_values=0)
-                    img_arr = flat.reshape((side, side, 3))
-                img = Image.fromarray(img_arr)
-                buffered = io.BytesIO()
-                img.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                log("Keras fallback image generated and encoded.")
-                return img_str, logs
-            except Exception as e2:
-                log(f"Keras fallback also failed: {str(e2)}")
-                return None, logs
+            log(f"PyTorch GAN failed: {str(e)}")
+            return None, logs
 
 @app.route('/health', methods=['GET'])
 def health_check():

@@ -22,23 +22,27 @@ gan = AxolotlGenerator()
 class AxolotlImageAPI:
     @staticmethod
     def generate_single_image():
-        # Use the exact same GAN sample command from train_gan.py for best quality
+        logs = []
+        def log(msg):
+            print(msg)
+            logs.append(str(msg))
         try:
+            log('--- [BACKEND] Starting GAN image generation ---')
             import torch
             import torch.nn as nn
             from torchvision.utils import save_image
             from models.gan_modules import Generator, Discriminator
             import numpy as np
-            
-            # Match the exact constants from train_gan.py
+            log(f"torch version: {torch.__version__}")
+            log(f"torchvision version: {__import__('torchvision').__version__}")
+            log(f"numpy version: {np.__version__}")
             DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
             SAMPLE_DIR = os.path.join(DATA_DIR, 'gan_samples')
             CHECKPOINT_PATH = os.path.join(DATA_DIR, 'gan_checkpoint.pth')
-            IMG_SIZE = 32  # Match the IMG_SIZE in train_gan.py
+            IMG_SIZE = 32
             Z_DIM = 100
-            DEVICE = torch.device('cpu')  # Force CPU for API inference
-            
-            # Create the GANTrainer instance exactly like train_gan.py
+            DEVICE = torch.device('cpu')
+            log(f"DEVICE: {DEVICE}")
             class GANTrainer:
                 def __init__(self, img_size, z_dim, device):
                     self.img_size = img_size
@@ -46,56 +50,40 @@ class AxolotlImageAPI:
                     self.device = device
                     self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
                     self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
-                    
                 def load_checkpoint(self):
+                    log(f"Looking for checkpoint at: {CHECKPOINT_PATH}")
                     if os.path.exists(CHECKPOINT_PATH):
-                        checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')  # Always load to CPU
+                        try:
+                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
+                        except TypeError as e:
+                            log(f"torch.load does not support weights_only argument (PyTorch <2.6?): {str(e)}. Retrying without it.")
+                            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+                        log(f"Checkpoint keys: {list(checkpoint.keys())}")
                         self.G.load_state_dict(checkpoint['G'])
-                        print("Loaded checkpoint for generating sample (CPU mode)")
+                        log("Loaded checkpoint for generating sample")
                     else:
-                        print("No checkpoint found, using untrained generator")
-                
+                        log("No checkpoint found, using untrained generator")
                 def generate_sample(self):
+                    log("Calling G.eval() and generating image...")
                     self.G.eval()
                     with torch.no_grad():
-                        # Use the same fixed noise as in train_gan.py
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                        # Save to memory buffer instead of disk
+                        log(f"Fake image tensor shape: {fake.shape}")
                         buffer = io.BytesIO()
                         save_image(fake, buffer, format="PNG", normalize=True)
                         buffer.seek(0)
+                        log("Image saved to buffer and ready to encode.")
                         return buffer.getvalue()
-            
-            # Create trainer and generate sample
             trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)
             trainer.load_checkpoint()
             img_bytes = trainer.generate_sample()
-                
-            # Return the image as base64
+            log("Image generation complete, encoding to base64...")
             img_str = base64.b64encode(img_bytes).decode("utf-8")
-            return img_str
+            log("Image base64 encoding complete.")
+            return img_str, logs
         except Exception as e:
-            # Fallback to Keras generator if PyTorch fails
-            print(f"PyTorch GAN failed, falling back to Keras: {str(e)}")
-            noise = np.random.normal(0, 1, (1, gan.input_shape[0]))
-            img_arr = gan.generate_image(noise)
-            if isinstance(img_arr, list) or len(img_arr.shape) == 4:
-                img_arr = img_arr[0]
-            img_arr = ((img_arr + 1) * 127.5).clip(0, 255).astype(np.uint8)
-            try:
-                img_arr = img_arr.reshape(gan.img_shape)
-            except Exception:
-                flat = img_arr.flatten()
-                side = int(np.ceil(np.sqrt(flat.size / 3)))
-                pad = side * side * 3 - flat.size
-                if pad > 0:
-                    flat = np.pad(flat, (0, pad), mode='constant', constant_values=0)
-                img_arr = flat.reshape((side, side, 3))
-            img = Image.fromarray(img_arr)
-            buffered = io.BytesIO()
-            img.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-            return img_str
+            log(f"PyTorch GAN failed: {str(e)}")
+            return None, logs
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -106,29 +94,8 @@ def health_check():
 
 @app.route('/generate', methods=['GET'])
 def generate_image():
-    logs = []
-    img_b64 = None
-    model_type = 'GAN'
-    error = None
-    try:
-        import sys
-        import traceback
-        from contextlib import redirect_stdout, redirect_stderr
-        import io as sysio
-        log_buffer = sysio.StringIO()
-        with redirect_stdout(log_buffer), redirect_stderr(log_buffer):
-            img_b64 = AxolotlImageAPI.generate_single_image()
-        logs = log_buffer.getvalue().splitlines()
-    except Exception as e:
-        error = str(e)
-        logs.append('Exception: ' + error)
-        logs.append(traceback.format_exc())
-    return jsonify({
-        'image': img_b64,
-        'model_type': model_type,
-        'logs': logs,
-        'error': error
-    })
+    img_b64, logs = AxolotlImageAPI.generate_single_image()
+    return jsonify({'image': img_b64, 'logs': logs})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))

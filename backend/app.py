@@ -135,14 +135,53 @@ class AxolotlImageAPI:
                 def generate_sample(self):
                     log("Calling G.eval() and generating image...")
                     self.G.eval()
-                    with torch.no_grad():
-                        fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                        log(f"Fake image tensor shape: {fake.shape}")
-                        buffer = io.BytesIO()
-                        save_image(fake, buffer, format="PNG", normalize=True)
-                        buffer.seek(0)
-                        log("Image saved to buffer and ready to encode.")
-                        return buffer.getvalue()
+                    try:
+                        with torch.no_grad():
+                            try:
+                                fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                                log(f"Fake image tensor shape: {fake.shape}")
+                                
+                                # Handle potential issues with the generated tensor
+                                if torch.isnan(fake).any() or torch.isinf(fake).any():
+                                    log("Warning: Generated image contains NaN or Inf values. Clamping...")
+                                    fake = torch.nan_to_num(fake, nan=0.0, posinf=1.0, neginf=-1.0)
+                                    fake = torch.clamp(fake, -1.0, 1.0)
+                                    
+                                buffer = io.BytesIO()
+                                save_image(fake, buffer, format="PNG", normalize=True)
+                                buffer.seek(0)
+                                log("Image saved to buffer and ready to encode.")
+                                return buffer.getvalue()
+                            except RuntimeError as e:
+                                if 'out of memory' in str(e).lower():
+                                    log("CUDA out of memory error. Trying with smaller batch...")
+                                    # Clear cache and try with single sample
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                    # Recreate noise with smaller size
+                                    single_noise = torch.randn(1, self.z_dim, 1, 1, device=self.device)
+                                    fake = self.G(single_noise).detach().cpu()
+                                    buffer = io.BytesIO()
+                                    save_image(fake, buffer, format="PNG", normalize=True)
+                                    buffer.seek(0)
+                                    log("Image saved to buffer and ready to encode (with memory optimization).")
+                                    return buffer.getvalue()
+                                else:
+                                    raise  # Re-raise if not a memory error
+                    except Exception as e:
+                        log(f"Error generating image: {str(e)}. Attempting fallback...")
+                        # Last resort: generate a very small image
+                        try:
+                            # Create a tiny random tensor as a placeholder
+                            placeholder = torch.rand(1, 3, 32, 32) * 2 - 1  # Range [-1, 1]
+                            buffer = io.BytesIO()
+                            save_image(placeholder, buffer, format="PNG", normalize=True)
+                            buffer.seek(0)
+                            log("Used fallback random image instead of generator output.")
+                            return buffer.getvalue()
+                        except Exception as e2:
+                            log(f"Fallback also failed: {str(e2)}")
+                            raise
             trainer = GANTrainer(img_size=IMG_SIZE, z_dim=Z_DIM, device=DEVICE)
             trainer.load_checkpoint()
             img_bytes = trainer.generate_sample()

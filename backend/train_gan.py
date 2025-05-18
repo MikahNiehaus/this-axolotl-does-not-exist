@@ -33,12 +33,14 @@ os.makedirs(SAMPLE_DIR, exist_ok=True)
 
 # --- DATASET ---
 class AxolotlDataset(Dataset):
-    def __init__(self, folder, transform=None, preload=False):
+    def __init__(self, folder, transform=None, preload=False, cache_tensors=False):
         self.folder = folder
         self.transform = transform
         self.preload = preload
+        self.cache_tensors = cache_tensors
         self.reload_files()
         self.images = None
+        self.tensors = None
         if self.preload:
             print(f"[DATA] Preloading {len(self.files)} images into RAM...")
             self.images = []
@@ -49,6 +51,16 @@ class AxolotlDataset(Dataset):
                 except Exception as e:
                     print(f"[DATA] Failed to preload {f}: {e}")
             print(f"[DATA] Preloaded {len(self.images)} images into RAM.")
+            if self.cache_tensors:
+                print(f"[DATA] Caching all transformed tensors in RAM...")
+                self.tensors = []
+                for img in self.images:
+                    try:
+                        tensor = self.transform(img) if self.transform else img
+                        self.tensors.append(tensor)
+                    except Exception as e:
+                        print(f"[DATA] Failed to transform image for tensor cache: {e}")
+                print(f"[DATA] Cached {len(self.tensors)} tensors in RAM.")
 
     def reload_files(self):
         self.files = glob.glob(os.path.join(self.folder, '*'))
@@ -56,10 +68,14 @@ class AxolotlDataset(Dataset):
             raise RuntimeError(f"No files found in {self.folder}")
 
     def __len__(self):
+        if self.cache_tensors and self.tensors is not None:
+            return len(self.tensors)
         return len(self.files) if not self.preload else len(self.images)
 
     def __getitem__(self, idx):
         try:
+            if self.cache_tensors and self.tensors is not None:
+                return self.tensors[idx]
             if self.preload and self.images is not None:
                 img = self.images[idx]
             else:
@@ -481,12 +497,13 @@ if __name__ == '__main__':
     parser.add_argument('command', nargs='?', default='train', choices=['train', 'sample', 'save_full_model'], help="'train' to train, 'sample' to generate a sample image only, 'save_full_model' to manually save and push full model")
     parser.add_argument('--num_workers', type=int, default=0, help='Number of worker processes for DataLoader (default: 0)')
     parser.add_argument('--preload', action='store_true', help='Preload all images into RAM for faster training (requires enough RAM)')
+    parser.add_argument('--cache_tensors', action='store_true', help='Cache all transformed tensors in RAM for fastest data loading (no random augmentations)')
     args = parser.parse_args()
 
     print(f"Using device: {DEVICE}")
 
-    # Use preload option from CLI
-    train_ds = AxolotlDataset(TRAIN_DIR, transform, preload=args.preload)
+    # Use preload and cache_tensors options from CLI
+    train_ds = AxolotlDataset(TRAIN_DIR, transform, preload=args.preload, cache_tensors=args.cache_tensors)
 
     # Update DataLoader to use configurable num_workers, pin_memory, and persistent_workers if using multiple workers
     pin_memory = DEVICE.type == 'cuda'

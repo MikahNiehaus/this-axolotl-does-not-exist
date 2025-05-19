@@ -30,6 +30,15 @@ if torch.cuda.is_available():
 RESOLUTIONS = [64, 128, 256, 512, 720, 1080]  # Progressive steps (now starts at 64)
 START_RES_INDEX = 0  # Start at lowest resolution
 MAX_RES_INDEX = len(RESOLUTIONS) - 1
+# Minimum epochs per resolution for a dataset of 1000 images with augmentation
+MIN_EPOCHS_PER_RES = {
+    64: 200,
+    128: 300,
+    256: 400,
+    512: 600,
+    720: 800,
+    1080: 1200
+}
 # Use absolute path to avoid path resolution issues
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
@@ -141,14 +150,15 @@ class GANTrainer:
         self.D = Discriminator(img_channels=3, img_size=img_size).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
-        self.scheduler_G = get_best_practice_scheduler(self.opt_G)
-        self.scheduler_D = get_best_practice_scheduler(self.opt_D)
+        # Remove learning rate schedulers for G and D (no LR decay)
+        self.scheduler_G = None
+        self.scheduler_D = None
         print(f"[INFO] Self-adjusting learning rate is ENABLED for both Generator and Discriminator.")
         self.criterion = nn.BCELoss()
         self.start_epoch = 0
         self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
         self.overfit_counter = 0
-        self.overfit_patience = 50
+        self.overfit_patience = 100
         self.last_D_losses = []
         self.last_G_losses = []
         self.checkpointing_level = 0
@@ -157,6 +167,7 @@ class GANTrainer:
         self.sample_interval = 100
         self.resolution_history = []
         self.res_index = START_RES_INDEX
+        self.epochs_at_res = 0  # Track epochs at current resolution
         print(f"[SUMMARY] GANTrainer will start at {img_size}x{img_size} and progressively grow to {RESOLUTIONS[MAX_RES_INDEX]}x{RESOLUTIONS[MAX_RES_INDEX]}.")
 
     def grow_resolution(self, prev_G=None, prev_D=None):
@@ -169,6 +180,7 @@ class GANTrainer:
             new_size = RESOLUTIONS[self.res_index]
             print(f"[PROGRESSIVE] Increasing image resolution to {new_size}x{new_size}.")
             self.img_size = new_size
+            self.epochs_at_res = 0  # Reset epoch counter for new resolution
             # Create new models
             new_G = Generator(z_dim=self.z_dim, img_channels=3, img_size=new_size).to(self.device)
             new_D = Discriminator(img_channels=3, img_size=new_size).to(self.device)
@@ -346,8 +358,6 @@ class GANTrainer:
                 self.D = Discriminator(img_channels=3, img_size=720).to(self.device)
                 self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
                 self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-                self.scheduler_G = ReduceLROnPlateau(self.opt_G, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6)
-                self.scheduler_D = ReduceLROnPlateau(self.opt_D, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6)
                 self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                 self.G.load_state_dict(checkpoint['G'])
                 self.D.load_state_dict(checkpoint['D'])
@@ -455,6 +465,7 @@ class GANTrainer:
         prev_G_loss = None
         vram_retry = 0
         max_epochs = EPOCHS
+        self.epochs_at_res = 0  # Track epochs at current resolution
         while True:
             try:
                 D_losses = []
@@ -518,12 +529,9 @@ class GANTrainer:
                 # Step learning rate schedulers
                 prev_lr_G = self.opt_G.param_groups[0]['lr']
                 prev_lr_D = self.opt_D.param_groups[0]['lr']
-                self.scheduler_G.step(avg_G_loss)
-                self.scheduler_D.step(avg_D_loss)
-                current_lr_G = self.opt_G.param_groups[0]['lr']
-                current_lr_D = self.opt_D.param_groups[0]['lr']
 
                 # --- Concise LR logging with patience counters ---
+                # Remove scheduler-based patience logic, just use plateau detection for upscaling and pausing
                 if not hasattr(self, '_lr_patience_G'):
                     self._lr_patience_G = 0
                     self._lr_last_metric_G = avg_G_loss
@@ -532,37 +540,33 @@ class GANTrainer:
                     self._lr_last_metric_D = avg_D_loss
 
                 # Generator patience logic
-                if avg_G_loss < getattr(self, '_lr_last_metric_G', float('inf')) - getattr(self.scheduler_G, 'threshold', 0.0):
+                if avg_G_loss < getattr(self, '_lr_last_metric_G', float('inf')):
                     self._lr_patience_G = 0
                 else:
                     self._lr_patience_G += 1
                 self._lr_last_metric_G = avg_G_loss
 
                 # Discriminator patience logic
-                if avg_D_loss < getattr(self, '_lr_last_metric_D', float('inf')) - getattr(self.scheduler_D, 'threshold', 0.0):
+                if avg_D_loss < getattr(self, '_lr_last_metric_D', float('inf')):
                     self._lr_patience_D = 0
                 else:
                     self._lr_patience_D += 1
                 self._lr_last_metric_D = avg_D_loss
 
-                patience_G = self.scheduler_G.patience if hasattr(self.scheduler_G, 'patience') else 7
-                patience_D = self.scheduler_D.patience if hasattr(self.scheduler_D, 'patience') else 7
-                print(f"[LR-G] G_loss={avg_G_loss:.4f} | patience={self._lr_patience_G}/{patience_G} | thresh={getattr(self.scheduler_G, 'threshold', 'unknown')}")
-                print(f"[LR-D] D_loss={avg_D_loss:.4f} | patience={self._lr_patience_D}/{patience_D} | thresh={getattr(self.scheduler_D, 'threshold', 'unknown')}")
+                patience_G = 100  # Set patience to 50
+                patience_D = 100
+                print(f"[LR-G] G_loss={avg_G_loss:.4f} | patience={self._lr_patience_G}/{patience_G}")
+                print(f"[LR-D] D_loss={avg_D_loss:.4f} | patience={self._lr_patience_D}/{patience_D}")
+
+                # Remove all scheduler-based LR change logic and variables
+                # Only print current fixed learning rates
+                print(f"[LR] G: {self.opt_G.param_groups[0]['lr']:.6f} | D: {self.opt_D.param_groups[0]['lr']:.6f}")
 
                 reset_counters = False
-                if current_lr_G < prev_lr_G:
-                    print(f"[LR-G] ↓ {prev_lr_G:.6f} → {current_lr_G:.6f} (plateau)")
-                    reset_counters = True
-                if current_lr_D < prev_lr_D:
-                    print(f"[LR-D] ↓ {prev_lr_D:.6f} → {current_lr_D:.6f} (plateau)")
-                    reset_counters = True
-                if not (current_lr_G < prev_lr_G or current_lr_D < prev_lr_D):
-                    print(f"[LR] No LR change (waiting for plateau)")
+                print(f"[LR] No LR change (waiting for plateau)")
                 if reset_counters:
                     self._lr_patience_G = 0
                     self._lr_patience_D = 0
-                print(f"[LR] G: {current_lr_G:.6f} | D: {current_lr_D:.6f}")
 
                 # Overfitting/no-improvement heuristic (for collapse detection only)
                 if prev_G_loss is not None and avg_G_loss >= prev_G_loss and avg_D_loss >= self._lr_last_metric_D:
@@ -578,12 +582,12 @@ class GANTrainer:
                     self.D = Discriminator(img_channels=3, img_size=self.img_size).to(self.device)
                     self.opt_G = optim.Adam(self.G.parameters(), lr=self.opt_G.param_groups[0]['lr'], betas=(0.5, 0.999))
                     self.opt_D = optim.Adam(self.D.parameters(), lr=self.opt_D.param_groups[0]['lr'], betas=(0.5, 0.999))
-                    self.scheduler_G = get_best_practice_scheduler(self.opt_G)
-                    self.scheduler_D = get_best_practice_scheduler(self.opt_D)
                     self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                     no_improve = 0
                     print(f"[RECOVERY] Models reset at {self.img_size}x{self.img_size}.")
                 # --- Progressive growing logic ---
+                self.epochs_at_res += 1  # Increment epoch counter for current resolution
+                min_epochs = MIN_EPOCHS_PER_RES.get(self.img_size, 0)
                 # If only one has plateaued, pause the other
                 if self._lr_patience_G >= patience_G and self._lr_patience_D < patience_D:
                     self.maybe_pause_optimizer('G')
@@ -593,10 +597,10 @@ class GANTrainer:
                     self.maybe_pause_optimizer('D')
                     self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
                     print(f"[SYNC] Discriminator plateaued, pausing D until Generator catches up.")
-                elif self._lr_patience_G >= patience_G and self._lr_patience_D >= patience_D:
-                    # Both plateaued: resume both, then save full model for this resolution, then upscale
-                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
-                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
+                elif self._lr_patience_G >= patience_G and self._lr_patience_D >= patience_D and self.epochs_at_res >= min_epochs:
+                    # Both plateaued and minimum epochs reached: resume both, then save full model and image for this resolution, then upscale
+                    self.maybe_resume_optimizer('G', self.opt_G.param_groups[0]['lr'])
+                    self.maybe_resume_optimizer('D', self.opt_D.param_groups[0]['lr'])
                     # Save a full model labeled as 'fully trained' for this resolution
                     fully_trained_path = os.path.join(DATA_DIR, f'gan_fully_trained_{self.img_size}x{self.img_size}.pth')
                     torch.save({
@@ -609,8 +613,16 @@ class GANTrainer:
                         'resolution_history': self.resolution_history
                     }, fully_trained_path)
                     print(f"[FULL MODEL] Saved fully trained model for {self.img_size}x{self.img_size} to {fully_trained_path}")
+                    # Save a sample image for this resolution
+                    self.G.eval()
+                    with torch.no_grad():
+                        fake = self.G(self.fixed_noise[:1]).detach().cpu()
+                        img_path = os.path.join(SAMPLE_DIR, f'fully_trained_sample_{self.img_size}x{self.img_size}.png')
+                        save_image(fake, img_path, normalize=True)
+                        print(f"[FULL MODEL] Saved fully trained sample image for {self.img_size}x{self.img_size} to {img_path}")
+                    self.G.train()
                     if self.img_size < RESOLUTIONS[MAX_RES_INDEX]:
-                        print(f"[PROGRESSIVE] Both G and D plateaued for {patience_G} (G) and {patience_D} (D) epochs. Upscaling...")
+                        print(f"[PROGRESSIVE] Both G and D plateaued for {patience_G} (G) and {patience_D} (D) epochs and minimum {min_epochs} epochs reached. Upscaling...")
                         prev_G = self.G
                         prev_D = self.D
                         self.grow_resolution(prev_G=prev_G, prev_D=prev_D)
@@ -619,10 +631,11 @@ class GANTrainer:
                         local_train_loader.dataset.transform = new_transform
                         self._lr_patience_G = 0
                         self._lr_patience_D = 0
+                        self.epochs_at_res = 0  # Reset epoch counter for new resolution
                         print(f"[PROGRESSIVE] DataLoader and models updated for {self.img_size}x{self.img_size}.")
                         continue  # Restart epoch at new resolution
                     else:
-                        print(f"[EARLY STOP] Both G and D plateaued at max quality {self.img_size}x{self.img_size}. Stopping to avoid model collapse.")
+                        print(f"[EARLY STOP] Both G and D plateaued at max quality {self.img_size}x{self.img_size} and minimum {min_epochs} epochs reached. Stopping to avoid model collapse.")
                         break
                 else:
                     # Neither has plateaued: resume both if needed

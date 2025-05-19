@@ -12,6 +12,7 @@ from models.git_model_handler import GitModelHandler
 from tqdm import tqdm
 import argparse
 import time
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # --- CONFIG ---
 # Use absolute path to avoid path resolution issues
@@ -123,11 +124,16 @@ class GANTrainer:
         self.D = Discriminator(img_channels=3, img_size=720).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
+        self.scheduler_G = ReduceLROnPlateau(self.opt_G, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0)
+        self.scheduler_D = ReduceLROnPlateau(self.opt_D, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0)
+        print("[INFO] Self-adjusting learning rate is ENABLED for both Generator and Discriminator.")
+        print("[INFO] If the loss plateaus for 10 epochs, the learning rate will be halved (min lr=1e-6).")
+        print("[INFO] This helps stabilize GAN training and recover from plateaus or divergence.")
         self.criterion = nn.BCELoss()
         self.start_epoch = 0
         self.fixed_noise = torch.randn(16, z_dim, 1, 1, device=device)
         self.overfit_counter = 0
-        self.overfit_patience = float('inf')  # Disable patience/early stopping
+        self.overfit_patience = 50  # Stop if no improvement for 50 epochs
         self.last_D_losses = []
         self.last_G_losses = []
         self.upscale_factor = 1  # No upscaling
@@ -250,6 +256,18 @@ class GANTrainer:
         # Log resolution history
         self.resolution_history.append({'epoch': epoch+1, 'img_size': self.img_size})
         print(f"[CHECKPOINT] Epoch {epoch+1} | Resolution: {self.img_size}x{self.img_size}")
+        # Save a new checkpoint file every 1000 epochs
+        if (epoch + 1) % 1000 == 0:
+            checkpoint_path_epoch = os.path.join(DATA_DIR, f'gan_checkpoint_epoch{epoch+1}.pth')
+            torch.save({
+                'G': self.G.state_dict(),
+                'D': self.D.state_dict(),
+                'opt_G': self.opt_G.state_dict(),
+                'opt_D': self.opt_D.state_dict(),
+                'epoch': epoch,
+                'img_size': self.img_size
+            }, checkpoint_path_epoch)
+            print(f"[CHECKPOINT] Saved epoch checkpoint: {checkpoint_path_epoch}")
 
     def save_full_model(self, epoch, manual=False):
         """Save the full model (not just checkpoint) and push to Git"""
@@ -294,6 +312,8 @@ class GANTrainer:
                 self.D = Discriminator(img_channels=3, img_size=720).to(self.device)
                 self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
                 self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                self.scheduler_G = ReduceLROnPlateau(self.opt_G, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6)
+                self.scheduler_D = ReduceLROnPlateau(self.opt_D, mode='min', factor=0.5, patience=10, verbose=True, min_lr=1e-6)
                 self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                 self.G.load_state_dict(checkpoint['G'])
                 self.D.load_state_dict(checkpoint['D'])
@@ -436,6 +456,18 @@ class GANTrainer:
                 epoch_end = time.time()
                 print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss:.4f} | G_loss: {avg_G_loss:.4f} | Resolution: {self.img_size}x{self.img_size}")
                 print(f"[TIMING] Epoch {epoch+1}: Total {epoch_end-epoch_start:.2f}s | Avg data load {sum(data_times)/len(data_times):.2f}s | Avg train {sum(batch_times)/len(batch_times):.2f}s per batch")
+                # Step learning rate schedulers
+                prev_lr_G = self.opt_G.param_groups[0]['lr']
+                prev_lr_D = self.opt_D.param_groups[0]['lr']
+                self.scheduler_G.step(avg_G_loss)
+                self.scheduler_D.step(avg_D_loss)
+                current_lr_G = self.opt_G.param_groups[0]['lr']
+                current_lr_D = self.opt_D.param_groups[0]['lr']
+                print(f"[LR] Generator LR: {current_lr_G:.6f} | Discriminator LR: {current_lr_D:.6f} (self-adjusting)")
+                if current_lr_G < prev_lr_G:
+                    print(f"[LR] Generator learning rate reduced from {prev_lr_G:.6f} to {current_lr_G:.6f} due to plateau in G_loss.")
+                if current_lr_D < prev_lr_D:
+                    print(f"[LR] Discriminator learning rate reduced from {prev_lr_D:.6f} to {current_lr_D:.6f} due to plateau in D_loss.")
                 # Overfitting/no-improvement heuristic
                 if prev_G_loss is not None and avg_G_loss >= prev_G_loss:
                     no_improve += 1
@@ -444,8 +476,8 @@ class GANTrainer:
                     no_improve = 0
                 prev_G_loss = avg_G_loss
                 if no_improve >= self.overfit_patience:
-                    # Disabled: do not stop for patience
-                    pass
+                    print(f"[EARLY STOP] No improvement in G_loss for {self.overfit_patience} epochs. Stopping to avoid model collapse.")
+                    break
                 if (epoch + 1) % self.sample_interval == 0 or epoch == 0:
                     print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)
@@ -550,3 +582,12 @@ if __name__ == '__main__':
         trainer.save_full_model(trainer.start_epoch, manual=True)
     else:
         trainer.train(train_loader, epochs=EPOCHS, sample_interval=SAMPLE_INTERVAL)
+
+# ---
+# How self-adjusting learning rate works:
+# The ReduceLROnPlateau scheduler monitors the average loss for each network (G and D).
+# If the loss does not improve for 'patience' epochs (here, 10), the learning rate is reduced by 'factor' (here, 0.5).
+# This helps the optimizer escape plateaus and can stabilize GAN training, especially if the loss gets stuck or diverges.
+# The minimum learning rate is set to 1e-6 to avoid going too low.
+# You will see log messages whenever the learning rate is reduced.
+# ---

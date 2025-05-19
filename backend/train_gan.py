@@ -15,6 +15,7 @@ import time
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import random
 import numpy as np
+from models.gan_weight_transfer import transfer_gan_weights, get_best_practice_scheduler
 
 # Set random seeds for reproducibility
 SEED = 42
@@ -140,12 +141,8 @@ class GANTrainer:
         self.D = Discriminator(img_channels=3, img_size=img_size).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
-        self.scheduler_G = ReduceLROnPlateau(
-            self.opt_G, mode='min', factor=0.5, patience=2, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0
-        )
-        self.scheduler_D = ReduceLROnPlateau(
-            self.opt_D, mode='min', factor=0.5, patience=2, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0
-        )
+        self.scheduler_G = get_best_practice_scheduler(self.opt_G)
+        self.scheduler_D = get_best_practice_scheduler(self.opt_D)
         print(f"[INFO] Self-adjusting learning rate is ENABLED for both Generator and Discriminator.")
         self.criterion = nn.BCELoss()
         self.start_epoch = 0
@@ -162,21 +159,34 @@ class GANTrainer:
         self.res_index = START_RES_INDEX
         print(f"[SUMMARY] GANTrainer will start at {img_size}x{img_size} and progressively grow to {RESOLUTIONS[MAX_RES_INDEX]}x{RESOLUTIONS[MAX_RES_INDEX]}.")
 
-    def grow_resolution(self):
+    def grow_resolution(self, prev_G=None, prev_D=None):
+        """
+        Progressive growing: upscale to next resolution and transfer weights from previous models.
+        If prev_G/prev_D are provided, transfer weights; otherwise, initialize fresh.
+        """
         if self.res_index < MAX_RES_INDEX:
             self.res_index += 1
             new_size = RESOLUTIONS[self.res_index]
             print(f"[PROGRESSIVE] Increasing image resolution to {new_size}x{new_size}.")
             self.img_size = new_size
-            # Rebuild Generator and Discriminator for new resolution
-            self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=new_size).to(self.device)
-            self.D = Discriminator(img_channels=3, img_size=new_size).to(self.device)
+            # Create new models
+            new_G = Generator(z_dim=self.z_dim, img_channels=3, img_size=new_size).to(self.device)
+            new_D = Discriminator(img_channels=3, img_size=new_size).to(self.device)
+            # Transfer weights if previous models are provided
+            if prev_G is not None and prev_D is not None:
+                print("[PROGRESSIVE] Transferring weights from previous resolution...")
+                transfer_gan_weights(prev_G, new_G)
+                transfer_gan_weights(prev_D, new_D)
+            else:
+                print("[PROGRESSIVE] No previous models provided, initializing new weights.")
+            self.G = new_G
+            self.D = new_D
             self.opt_G = optim.Adam(self.G.parameters(), lr=self.opt_G.param_groups[0]['lr'], betas=(0.5, 0.999))
             self.opt_D = optim.Adam(self.D.parameters(), lr=self.opt_D.param_groups[0]['lr'], betas=(0.5, 0.999))
-            self.scheduler_G = ReduceLROnPlateau(self.opt_G, mode='min', factor=0.5, patience=2, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0)
-            self.scheduler_D = ReduceLROnPlateau(self.opt_D, mode='min', factor=0.5, patience=2, verbose=True, min_lr=1e-6, threshold=0.0, cooldown=0)
+            self.scheduler_G = get_best_practice_scheduler(self.opt_G)
+            self.scheduler_D = get_best_practice_scheduler(self.opt_D)
             self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
-            print(f"[PROGRESSIVE] Models and optimizer reset for {new_size}x{new_size}.")
+            print(f"[PROGRESSIVE] Models and optimizer ready for {new_size}x{new_size}.")
             return True
         return False
 
@@ -410,6 +420,32 @@ class GANTrainer:
             if hasattr(self, 'checkpointing_level') and self.checkpointing_level > 0:
                 self.enable_gradient_checkpointing()
 
+    def maybe_pause_optimizer(self, which):
+        """
+        Pause the optimizer for G or D if the other has not plateaued yet.
+        """
+        if which == 'G':
+            for param_group in self.opt_G.param_groups:
+                param_group['lr'] = 0.0
+            print("[LR-G] Paused Generator learning rate (waiting for Discriminator to plateau)")
+        elif which == 'D':
+            for param_group in self.opt_D.param_groups:
+                param_group['lr'] = 0.0
+            print("[LR-D] Paused Discriminator learning rate (waiting for Generator to plateau)")
+
+    def maybe_resume_optimizer(self, which, lr):
+        """
+        Resume the optimizer for G or D to the given learning rate.
+        """
+        if which == 'G':
+            for param_group in self.opt_G.param_groups:
+                param_group['lr'] = lr
+            print(f"[LR-G] Resumed Generator learning rate to {lr:.6f}")
+        elif which == 'D':
+            for param_group in self.opt_D.param_groups:
+                param_group['lr'] = lr
+            print(f"[LR-D] Resumed Discriminator learning rate to {lr:.6f}")
+
     def train(self, train_loader, epochs=float('inf'), sample_interval=1000):
         local_train_loader = train_loader
         self.load_checkpoint()
@@ -509,8 +545,8 @@ class GANTrainer:
                     self._lr_patience_D += 1
                 self._lr_last_metric_D = avg_D_loss
 
-                patience_G = self.scheduler_G.patience if hasattr(self.scheduler_G, 'patience') else 'unknown'
-                patience_D = self.scheduler_D.patience if hasattr(self.scheduler_D, 'patience') else 'unknown'
+                patience_G = self.scheduler_G.patience if hasattr(self.scheduler_G, 'patience') else 7
+                patience_D = self.scheduler_D.patience if hasattr(self.scheduler_D, 'patience') else 7
                 print(f"[LR-G] G_loss={avg_G_loss:.4f} | patience={self._lr_patience_G}/{patience_G} | thresh={getattr(self.scheduler_G, 'threshold', 'unknown')}")
                 print(f"[LR-D] D_loss={avg_D_loss:.4f} | patience={self._lr_patience_D}/{patience_D} | thresh={getattr(self.scheduler_D, 'threshold', 'unknown')}")
 
@@ -528,27 +564,70 @@ class GANTrainer:
                     self._lr_patience_D = 0
                 print(f"[LR] G: {current_lr_G:.6f} | D: {current_lr_D:.6f}")
 
-                # Overfitting/no-improvement heuristic
-                if prev_G_loss is not None and avg_G_loss >= prev_G_loss:
+                # Overfitting/no-improvement heuristic (for collapse detection only)
+                if prev_G_loss is not None and avg_G_loss >= prev_G_loss and avg_D_loss >= self._lr_last_metric_D:
                     no_improve += 1
-                    print(f"[No improvement] {no_improve}/{self.overfit_patience} epochs at {self.img_size}x{self.img_size}.")
+                    print(f"[No improvement] {no_improve}/20 epochs with no G or D improvement at {self.img_size}x{self.img_size}.")
                 else:
                     no_improve = 0
                 prev_G_loss = avg_G_loss
+                # If no improvement in both for a long time at max res, reset models (collapse recovery)
+                if no_improve >= 20 and self.img_size == RESOLUTIONS[MAX_RES_INDEX]:
+                    print(f"[RECOVERY] No improvement in G and D for 20 epochs at max resolution. Resetting models to recover from collapse.")
+                    self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=self.img_size).to(self.device)
+                    self.D = Discriminator(img_channels=3, img_size=self.img_size).to(self.device)
+                    self.opt_G = optim.Adam(self.G.parameters(), lr=self.opt_G.param_groups[0]['lr'], betas=(0.5, 0.999))
+                    self.opt_D = optim.Adam(self.D.parameters(), lr=self.opt_D.param_groups[0]['lr'], betas=(0.5, 0.999))
+                    self.scheduler_G = get_best_practice_scheduler(self.opt_G)
+                    self.scheduler_D = get_best_practice_scheduler(self.opt_D)
+                    self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
+                    no_improve = 0
+                    print(f"[RECOVERY] Models reset at {self.img_size}x{self.img_size}.")
                 # --- Progressive growing logic ---
-                if no_improve >= self.overfit_patience:
+                # If only one has plateaued, pause the other
+                if self._lr_patience_G >= patience_G and self._lr_patience_D < patience_D:
+                    self.maybe_pause_optimizer('G')
+                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
+                    print(f"[SYNC] Generator plateaued, pausing G until Discriminator catches up.")
+                elif self._lr_patience_D >= patience_D and self._lr_patience_G < patience_G:
+                    self.maybe_pause_optimizer('D')
+                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
+                    print(f"[SYNC] Discriminator plateaued, pausing D until Generator catches up.")
+                elif self._lr_patience_G >= patience_G and self._lr_patience_D >= patience_D:
+                    # Both plateaued: resume both, then save full model for this resolution, then upscale
+                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
+                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
+                    # Save a full model labeled as 'fully trained' for this resolution
+                    fully_trained_path = os.path.join(DATA_DIR, f'gan_fully_trained_{self.img_size}x{self.img_size}.pth')
+                    torch.save({
+                        'G': self.G.state_dict(),
+                        'D': self.D.state_dict(),
+                        'opt_G': self.opt_G.state_dict(),
+                        'opt_D': self.opt_D.state_dict(),
+                        'epoch': epoch,
+                        'img_size': self.img_size,
+                        'resolution_history': self.resolution_history
+                    }, fully_trained_path)
+                    print(f"[FULL MODEL] Saved fully trained model for {self.img_size}x{self.img_size} to {fully_trained_path}")
                     if self.img_size < RESOLUTIONS[MAX_RES_INDEX]:
-                        print(f"[PROGRESSIVE] No improvement for {self.overfit_patience} epochs at {self.img_size}x{self.img_size}. Upscaling...")
-                        self.grow_resolution()
+                        print(f"[PROGRESSIVE] Both G and D plateaued for {patience_G} (G) and {patience_D} (D) epochs. Upscaling...")
+                        prev_G = self.G
+                        prev_D = self.D
+                        self.grow_resolution(prev_G=prev_G, prev_D=prev_D)
                         # Update DataLoader and transform for new resolution
                         new_transform = get_transform(self.img_size)
                         local_train_loader.dataset.transform = new_transform
-                        no_improve = 0
+                        self._lr_patience_G = 0
+                        self._lr_patience_D = 0
                         print(f"[PROGRESSIVE] DataLoader and models updated for {self.img_size}x{self.img_size}.")
                         continue  # Restart epoch at new resolution
                     else:
-                        print(f"[EARLY STOP] No improvement in G_loss for {self.overfit_patience} epochs at max quality {self.img_size}x{self.img_size}. Stopping to avoid model collapse.")
+                        print(f"[EARLY STOP] Both G and D plateaued at max quality {self.img_size}x{self.img_size}. Stopping to avoid model collapse.")
                         break
+                else:
+                    # Neither has plateaued: resume both if needed
+                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
+                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
                 if (epoch + 1) % self.sample_interval == 0 or epoch == 0:
                     print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)

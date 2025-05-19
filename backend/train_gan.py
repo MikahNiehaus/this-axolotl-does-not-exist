@@ -26,8 +26,8 @@ if torch.cuda.is_available():
 
 # --- CONFIG ---
 # Progressive resolution settings
-RESOLUTIONS = [32, 64, 128, 256, 512, 720, 1080]  # Start at 32, double each time up to 1080
-START_RES_INDEX = 0  # Start at 32x32
+RESOLUTIONS = [64, 128, 256, 512, 720, 1080]  # Progressive steps (now starts at 64)
+START_RES_INDEX = 0  # Start at lowest resolution
 MAX_RES_INDEX = len(RESOLUTIONS) - 1
 # Use absolute path to avoid path resolution issues
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')

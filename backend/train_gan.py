@@ -45,7 +45,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
 IMG_SIZE = 720  # Always train at 720p
-BATCH_SIZE = 32
+BATCH_SIZE = 128
 EPOCHS = 50000  # Best practice: use clear, descriptive variable name for epochs
 LEARNING_RATE = 2e-4
 Z_DIM = 100
@@ -127,11 +127,7 @@ class AxolotlDataset(Dataset):
 def get_transform(img_size):
     return transforms.Compose([
         transforms.Resize((img_size, img_size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(20, fill=1),
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.95, 1.05), shear=5, fill=1),
+        transforms.RandomHorizontalFlip(p=0.5),  # Randomly flip image left to right
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3)
     ])
@@ -150,7 +146,7 @@ class GANTrainer:
         self.G = Generator(z_dim=z_dim, img_channels=3, img_size=img_size).to(device)
         self.D = Discriminator(img_channels=3, img_size=img_size).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
-        self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
+        self.opt_D = optim.Adam(self.D.parameters(), lr=lr * 0.2, betas=(0.5, 0.999))  # D learns much slower than G
         # Store initial learning rates for resuming
         for param_group in self.opt_G.param_groups:
             param_group['lr_init'] = lr
@@ -324,7 +320,7 @@ class GANTrainer:
                 self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=720).to(self.device)
                 self.D = Discriminator(img_channels=3, img_size=720).to(self.device)
                 self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-                self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE * 0.2, betas=(0.5, 0.999))  # D learns much slower than G
                 self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                 self.G.load_state_dict(checkpoint['G'])
                 self.D.load_state_dict(checkpoint['D'])
@@ -348,7 +344,7 @@ class GANTrainer:
                 self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=720).to(self.device)
                 self.D = Discriminator(img_channels=3, img_size=720).to(self.device)
                 self.opt_G = optim.Adam(self.G.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
-                self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE, betas=(0.5, 0.999))
+                self.opt_D = optim.Adam(self.D.parameters(), lr=LEARNING_RATE * 0.2, betas=(0.5, 0.999))  # D learns much slower than G
                 self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
                 self.start_epoch = 0
                 return
@@ -370,9 +366,11 @@ class GANTrainer:
                 # Generate a grid of samples and overwrite the same file
                 try:
                     torch.cuda.empty_cache()  # Clear memory first
-                    fake_grid = self.G(self.fixed_noise).detach().cpu()
+                    # Use truly new random noise for each image in the grid
+                    grid_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
+                    fake_grid = self.G(grid_noise).detach().cpu()
                     # Each image in the grid is 720x720, no upscaling or resizing
-                    save_image(fake_grid, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True, nrow=4, padding=2)
+                    save_image(fake_grid, os.path.join(SAMPLE_DIR, 'sample_grid.png'), normalize=True, nrow=4, padding=2, pad_value=1)
                 except RuntimeError as e:
                     if 'CUDA out of memory' in str(e):
                         print("[VRAM] Grid sample generation skipped due to memory constraints")
@@ -448,6 +446,13 @@ class GANTrainer:
         D_paused = False
         G_paused_epochs = 0
         D_paused_epochs = 0
+        D_ahead_threshold = 0.5  # If D loss is below this, it's considered 'ahead'
+        D_ahead_patience = 10    # Number of consecutive batches before pausing D
+        D_ahead_counter = 0
+        D_paused_flag = False
+        # --- New: Pause only if loss difference exceeds margin ---
+        PAUSE_MARGIN = 1.0  # Pause if one loss is this much ahead of the other
+        G_paused_flag = False
         while epoch < max_epochs:
             # Set a new random seed for each epoch for better randomness
             epoch_seed = int(time.time()) + epoch
@@ -459,8 +464,15 @@ class GANTrainer:
             try:
                 D_losses = []
                 G_losses = []
+                D_paused_batches = 0
+                G_paused_batches = 0
+                D_paused_streak = 0
+                G_paused_streak = 0
+                max_D_paused_streak = 0
+                max_G_paused_streak = 0
+                last_paused = None
                 epoch_start = time.time()
-                pbar = tqdm(local_train_loader, desc=f"Epoch {epoch+1} (Quality: {self.img_size}x{self.img_size})", leave=False)
+                pbar = tqdm(local_train_loader, desc=f"Epoch {epoch+1} [{self.img_size}x{self.img_size}]", leave=False)
                 use_amp = hasattr(self, 'use_amp') and self.use_amp
                 batch_times = []
                 data_times = []
@@ -482,22 +494,94 @@ class GANTrainer:
                     self.opt_G.zero_grad()
                     output = self.D(fake).view(-1)
                     loss_G = self.criterion(output, torch.ones_like(output))
-                    # Decide which network to update (worse loss)
-                    if loss_D.item() > loss_G.item():
-                        # Update D only
-                        loss_D.backward()
-                        self.opt_D.step()
-                        D_losses.append(loss_D.item())
-                        G_losses.append(float('nan'))  # Mark G as paused for this batch
-                        print("[PAUSE] Generator paused this batch.")
+
+                    # --- Diversity Regularization (MSGAN-style) ---
+                    diversity_lambda = 5.0  # Strong single-pair diversity (keep high)
+                    z1 = torch.randn(batch_size, self.z_dim, 1, 1, device=self.device)
+                    z2 = torch.randn(batch_size, self.z_dim, 1, 1, device=self.device)
+                    fake1 = self.G(z1)
+                    fake2 = self.G(z2)
+                    img_dist = torch.mean(torch.abs(fake1 - fake2))
+                    noise_dist = torch.mean(torch.abs(z1 - z2))
+                    diversity_loss = -img_dist / (noise_dist + 1e-5)
+
+                    # --- Remove Batch/Grid Diversity Loss ---
+                    # grid_lambda = 0.5  # Lower effect for grid diversity (set low)
+                    # grid_noise = torch.randn(batch_size, self.z_dim, 1, 1, device=self.device)
+                    # grid_fakes = self.G(grid_noise)
+                    # grid_fakes_flat = grid_fakes.view(batch_size, -1)
+                    # dists = torch.cdist(grid_fakes_flat, grid_fakes_flat, p=1)
+                    # dists = dists + torch.eye(batch_size, device=dists.device) * 1e6
+                    # min_dist = torch.min(dists)
+                    # mean_dist = torch.mean(dists[dists < 1e5])
+                    # grid_diversity_loss = -mean_dist
+
+                    # Total generator loss (no grid diversity)
+                    loss_G_total = loss_G + diversity_lambda * diversity_loss
+
+                    # --- Intra-batch neighbor diversity penalty (stronger for too-similar neighbors) ---
+                    neighbor_penalty_lambda = 0.2  # You can also increase this value for more effect
+                    neighbor_count = 2
+                    neighbor_penalty = 0.0
+                    for i in range(batch_size):
+                        main_z = noise[i:i+1]
+                        main_fake = self.G(main_z)
+                        for _ in range(neighbor_count):
+                            neighbor_z = torch.randn_like(main_z)
+                            neighbor_fake = self.G(neighbor_z)
+                            dist = torch.mean(torch.abs(main_fake - neighbor_fake))  # L1 distance
+                            penalty = torch.relu(0.1 - dist)  # Penalize if too close (<0.1)
+                            neighbor_penalty += penalty
+                    neighbor_penalty = neighbor_penalty / (batch_size * neighbor_count)
+                    loss_G_total = loss_G_total + neighbor_penalty_lambda * neighbor_penalty
+
+                    # --- Updated pause logic: only pause if loss difference exceeds margin ---
+                    if (loss_D.item() + PAUSE_MARGIN) < loss_G.item():
+                        D_paused_flag = True
+                        G_paused_flag = False
+                        if pbar.n == 0 or pbar.n % 10 == 0:
+                            print(f"[PAUSE] Discriminator paused (D loss {loss_D.item():.4f} is >{PAUSE_MARGIN} below G loss {loss_G.item():.4f})")
+                    elif (loss_G.item() + PAUSE_MARGIN) < loss_D.item():
+                        G_paused_flag = True
+                        D_paused_flag = False
+                        if pbar.n == 0 or pbar.n % 10 == 0:
+                            print(f"[PAUSE] Generator paused (G loss {loss_G.item():.4f} is >{PAUSE_MARGIN} below D loss {loss_D.item():.4f})")
                     else:
-                        # Update G only
-                        loss_G.backward()
-                        self.opt_G.step()
+                        D_paused_flag = False
+                        G_paused_flag = False
+                    # Update logic
+                    if loss_D.item() > loss_G.item():
+                        # Update D only if not paused
+                        if not D_paused_flag:
+                            loss_D.backward()
+                            self.opt_D.step()
+                        D_losses.append(loss_D.item())
                         G_losses.append(loss_G.item())
-                        D_losses.append(float('nan'))  # Mark D as paused for this batch
-                        print("[PAUSE] Discriminator paused this batch.")
-                    pbar.set_postfix({"D_loss": D_losses[-1] if not isinstance(D_losses[-1], float) or not D_losses[-1] != D_losses[-1] else 'N/A', "G_loss": G_losses[-1] if not isinstance(G_losses[-1], float) or not G_losses[-1] != G_losses[-1] else 'N/A'})
+                        G_paused_batches += 1
+                        if last_paused == 'G':
+                            G_paused_streak += 1
+                        else:
+                            G_paused_streak = 1
+                        max_G_paused_streak = max(max_G_paused_streak, G_paused_streak)
+                        D_paused_streak = 0
+                        last_paused = 'G'
+                    else:
+                        # Update G only if not paused
+                        if not G_paused_flag:
+                            loss_G_total.backward()
+                            self.opt_G.step()
+                        G_losses.append(loss_G.item())
+                        D_losses.append(loss_D.item())
+                        D_paused_batches += 1
+                        if last_paused == 'D':
+                            D_paused_streak += 1
+                        else:
+                            D_paused_streak = 1
+                        max_D_paused_streak = max(max_D_paused_streak, D_paused_streak)
+                        G_paused_streak = 0
+                        last_paused = 'D'
+                        if epoch == 0 and pbar.n < 3:
+                            print(f"[MSGAN] (G update) G loss: {loss_G.item():.4f} | Diversity: {diversity_loss.item():.4f}")
                     batch_end = time.time()
                     batch_times.append(batch_end - data_loaded)
                     batch_start = time.time()
@@ -505,7 +589,9 @@ class GANTrainer:
                 avg_D_loss = (sum([x for x in D_losses if not (isinstance(x, float) and x != x)]) / max(1, len([x for x in D_losses if not (isinstance(x, float) and x != x)]))) if any([not (isinstance(x, float) and x != x) for x in D_losses]) else float('nan')
                 avg_G_loss = (sum([x for x in G_losses if not (isinstance(x, float) and x != x)]) / max(1, len([x for x in G_losses if not (isinstance(x, float) and x != x)]))) if any([not (isinstance(x, float) and x != x) for x in G_losses]) else float('nan')
                 epoch_end = time.time()
-                print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss if not isinstance(avg_D_loss, float) or not avg_D_loss != avg_D_loss else 'N/A'} | G_loss: {avg_G_loss if not isinstance(avg_G_loss, float) or not avg_G_loss != avg_G_loss else 'N/A'} | Quality: {self.img_size}x{self.img_size}")
+                # Only one of D or G is paused per batch; sum equals number of batches
+                num_batches = D_paused_batches + G_paused_batches
+                print(f"[E{epoch+1}] D: {avg_D_loss:.4f} | G: {avg_G_loss:.4f} | D-paused: {D_paused_batches}/{num_batches} (streak {D_paused_streak}) | G-paused: {G_paused_batches}/{num_batches} (streak {G_paused_streak}) | Time: {epoch_end-epoch_start:.1f}s")
                 print(f"[TIMING] Epoch {epoch+1}: Total {epoch_end-epoch_start:.2f}s | Avg data load {sum(data_times)/len(data_times):.2f}s | Avg train {sum(batch_times)/len(batch_times):.2f}s per batch")
                 print(f"[LR] G: {self.opt_G.param_groups[0]['lr']:.6f} | D: {self.opt_D.param_groups[0]['lr']:.6f}")
                 # Save sample and checkpoint at intervals
@@ -519,6 +605,14 @@ class GANTrainer:
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()
                         save_image(fake, os.path.join(SAMPLE_DIR, 'sample_epochmanual.png'), normalize=True)
                     self.G.train()
+                    # --- Save a grid of real images as seen by the Discriminator ---
+                    try:
+                        real_batch = next(iter(train_loader))
+                        real_grid_path = os.path.join(SAMPLE_DIR, 'real_grid_epoch.png')
+                        save_image(real_batch[:16], real_grid_path, normalize=True, nrow=4, padding=2, pad_value=1)
+                        print(f"[SAMPLE] Saved real image grid: {real_grid_path}")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to save real image grid: {e}")
                 # Create full model file every git_push_interval epochs only
                 if (epoch + 1) % self.git_push_interval == 0:
                     self.save_full_model(epoch)
@@ -529,11 +623,21 @@ class GANTrainer:
                         with torch.no_grad():
                             fake_grid = self.G(self.fixed_noise).detach().cpu()
                             grid_path = os.path.join(SAMPLE_DIR, f'sample_grid_epoch{epoch+1}.png')
-                            save_image(fake_grid, grid_path, normalize=True, nrow=4, padding=2)
+                            save_image(fake_grid, grid_path, normalize=True, nrow=4, padding=2, pad_value=1)
                             print(f"[SAMPLE] Saved grid image: {grid_path}")
                         self.G.train()
                     except Exception as e:
                         print(f"[ERROR] Failed to save grid image for epoch {epoch+1}: {e}")
+                    # Save full generator model every 1000 epochs with t_epoch{epoch+1}.pth
+                    full_model_path = os.path.join(DATA_DIR, f'gan_full_model_t_epoch{epoch+1}.pth')
+                    torch.save({
+                        'G': self.G.state_dict(),
+                        'opt_G': self.opt_G.state_dict(),
+                        'epoch': epoch,
+                        'img_size': self.img_size,
+                        'resolution_history': self.resolution_history
+                    }, full_model_path)
+                    print(f"[FULLMODEL] Saved full generator model: {full_model_path}")
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch
             except RuntimeError as e:
@@ -572,22 +676,23 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     print(f"Using device: {DEVICE}")
+    print(f"[INFO] CUDA: {'ON' if torch.cuda.is_available() else 'OFF'} | Device: {DEVICE}")
 
     if args.command == 'train':
-        print("Available resolutions:", RESOLUTIONS)
+        print(f"[INFO] Resolutions: {RESOLUTIONS}")
         try:
-            res = int(input(f"Enter desired training resolution from {RESOLUTIONS}: "))
+            res = int(input(f"Enter training resolution {RESOLUTIONS}: "))
             if res not in RESOLUTIONS:
                 raise ValueError()
         except Exception:
-            print(f"Invalid resolution. Defaulting to {RESOLUTIONS[0]}.")
+            print(f"[WARN] Invalid resolution. Using {RESOLUTIONS[0]}")
             res = RESOLUTIONS[0]
         try:
-            epochs = int(input("Enter number of epochs to run (minimum 1): "))
+            epochs = int(input("Epochs (min 1): "))
             if epochs < 1:
                 raise ValueError()
         except Exception:
-            print("Invalid epoch count. Defaulting to 200.")
+            print("[WARN] Invalid epoch count. Using 200.")
             epochs = 200
         transform = get_transform(res)
         train_ds = AxolotlDataset(TRAIN_DIR, transform, preload=args.preload, cache_tensors=args.cache_tensors)
@@ -602,24 +707,19 @@ if __name__ == '__main__':
             pin_memory=pin_memory,
             persistent_workers=persistent_workers
         )
-
-        # --- Progressive upscaling and weight transfer logic ---
+        # --- Concise progressive upscaling log and logic ---
         res_index = RESOLUTIONS.index(res)
         checkpoint_loaded = False
         for lower_res in reversed(RESOLUTIONS[:res_index]):
             lower_ckpt = os.path.join(DATA_DIR, f'gan_checkpoint_{lower_res}.pth')
             if os.path.exists(lower_ckpt):
-                print(f"[UPSCALE] Found lower-res checkpoint: {lower_ckpt}")
-                # Load lower-res model
+                print(f"[GROW] Growing model: {lower_res} -> {res} (loading {lower_ckpt})")
                 lower_G = Generator(z_dim=Z_DIM, img_channels=3, img_size=lower_res).to(DEVICE)
                 lower_D = Discriminator(img_channels=3, img_size=lower_res).to(DEVICE)
                 ckpt = torch.load(lower_ckpt, map_location=DEVICE)
                 lower_G.load_state_dict(ckpt['G'])
                 lower_D.load_state_dict(ckpt['D'])
-                # Init new model at target res
                 trainer = GANTrainer(img_size=res, z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
-                # Transfer weights
-                print(f"[UPSCALE] Transferring weights from {lower_res} to {res}...")
                 transfer_gan_weights(lower_G, trainer.G)
                 transfer_gan_weights(lower_D, trainer.D)
                 checkpoint_loaded = True

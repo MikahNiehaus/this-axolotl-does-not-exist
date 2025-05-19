@@ -195,6 +195,20 @@ class Discriminator(nn.Module):
         return x
     
     def forward(self, x):
+        # Always use explicit 4-layer path for 32x32 to avoid kernel errors
+        if self.img_size == 32:
+            if self.use_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(lambda x: self.layer1(x), x)
+                x = torch.utils.checkpoint.checkpoint(lambda x: self.layer2(x), x)
+                x = torch.utils.checkpoint.checkpoint(lambda x: self.layer3(x), x)
+                x = self.layer4(x)
+            else:
+                x = self.layer1(x)
+                x = self.layer2(x)
+                x = self.layer3(x)
+                x = self.layer4(x)
+            return x
+        # For higher resolutions, use checkpointing or net as appropriate
         if self.use_checkpointing and self.training:
             return self._checkpoint_forward(x)
         else:

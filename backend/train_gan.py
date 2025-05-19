@@ -27,11 +27,12 @@ if torch.cuda.is_available():
 
 # --- CONFIG ---
 # Progressive resolution settings
-RESOLUTIONS = [64, 128, 256, 512, 720, 1080]  # Progressive steps (now starts at 64)
+RESOLUTIONS = [32, 64, 128, 256, 512, 720, 1080]  # Now starts at 32
 START_RES_INDEX = 0  # Start at lowest resolution
 MAX_RES_INDEX = len(RESOLUTIONS) - 1
 # Minimum epochs per resolution for a dataset of 1000 images with augmentation
 MIN_EPOCHS_PER_RES = {
+    32: 100,
     64: 200,
     128: 300,
     256: 400,
@@ -150,6 +151,11 @@ class GANTrainer:
         self.D = Discriminator(img_channels=3, img_size=img_size).to(device)
         self.opt_G = optim.Adam(self.G.parameters(), lr=lr, betas=(0.5, 0.999))
         self.opt_D = optim.Adam(self.D.parameters(), lr=lr, betas=(0.5, 0.999))
+        # Store initial learning rates for resuming
+        for param_group in self.opt_G.param_groups:
+            param_group['lr_init'] = lr
+        for param_group in self.opt_D.param_groups:
+            param_group['lr_init'] = lr
         # Remove learning rate schedulers for G and D (no LR decay)
         self.scheduler_G = None
         self.scheduler_D = None
@@ -166,41 +172,9 @@ class GANTrainer:
         self.git_push_interval = 1000
         self.sample_interval = 100
         self.resolution_history = []
-        self.res_index = START_RES_INDEX
+        self.res_index = RESOLUTIONS.index(img_size) if img_size in RESOLUTIONS else 0
         self.epochs_at_res = 0  # Track epochs at current resolution
-        print(f"[SUMMARY] GANTrainer will start at {img_size}x{img_size} and progressively grow to {RESOLUTIONS[MAX_RES_INDEX]}x{RESOLUTIONS[MAX_RES_INDEX]}.")
-
-    def grow_resolution(self, prev_G=None, prev_D=None):
-        """
-        Progressive growing: upscale to next resolution and transfer weights from previous models.
-        If prev_G/prev_D are provided, transfer weights; otherwise, initialize fresh.
-        """
-        if self.res_index < MAX_RES_INDEX:
-            self.res_index += 1
-            new_size = RESOLUTIONS[self.res_index]
-            print(f"[PROGRESSIVE] Increasing image resolution to {new_size}x{new_size}.")
-            self.img_size = new_size
-            self.epochs_at_res = 0  # Reset epoch counter for new resolution
-            # Create new models
-            new_G = Generator(z_dim=self.z_dim, img_channels=3, img_size=new_size).to(self.device)
-            new_D = Discriminator(img_channels=3, img_size=new_size).to(self.device)
-            # Transfer weights if previous models are provided
-            if prev_G is not None and prev_D is not None:
-                print("[PROGRESSIVE] Transferring weights from previous resolution...")
-                transfer_gan_weights(prev_G, new_G)
-                transfer_gan_weights(prev_D, new_D)
-            else:
-                print("[PROGRESSIVE] No previous models provided, initializing new weights.")
-            self.G = new_G
-            self.D = new_D
-            self.opt_G = optim.Adam(self.G.parameters(), lr=self.opt_G.param_groups[0]['lr'], betas=(0.5, 0.999))
-            self.opt_D = optim.Adam(self.D.parameters(), lr=self.opt_D.param_groups[0]['lr'], betas=(0.5, 0.999))
-            self.scheduler_G = get_best_practice_scheduler(self.opt_G)
-            self.scheduler_D = get_best_practice_scheduler(self.opt_D)
-            self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
-            print(f"[PROGRESSIVE] Models and optimizer ready for {new_size}x{new_size}.")
-            return True
-        return False
+        print(f"[SUMMARY] GANTrainer will start at {img_size}x{img_size} and train only at this resolution.")
 
     def _check_git_available(self):
         """Check if Git is available and we're in a Git repository"""
@@ -216,11 +190,6 @@ class GANTrainer:
             return result.returncode == 0
         except Exception:
             return False
-
-    def upscale(self):
-        # Never upscale, always return False
-        print("[INFO] Upscaling disabled. Sticking to 180p.")
-        return False
 
     def enable_gradient_checkpointing(self):
         """Enable gradient checkpointing to save VRAM memory at the cost of computation speed"""
@@ -324,12 +293,10 @@ class GANTrainer:
         full_model_abs_path = os.path.abspath(FULL_MODEL_PATH)
         print(f"[FullModel] Saving full model to: {full_model_abs_path}")
         
-        # Save the full model (generator, discriminator, optimizer states, etc.)
+        # Save the full model (generator only, plus metadata)
         torch.save({
             'G': self.G.state_dict(),
-            'D': self.D.state_dict(),
             'opt_G': self.opt_G.state_dict(),
-            'opt_D': self.opt_D.state_dict(),
             'epoch': epoch,
             'img_size': self.img_size,
             'resolution_history': self.resolution_history
@@ -438,23 +405,31 @@ class GANTrainer:
             for param_group in self.opt_G.param_groups:
                 param_group['lr'] = 0.0
             print("[LR-G] Paused Generator learning rate (waiting for Discriminator to plateau)")
+            print("[LOG] Generator is PAUSED.")
         elif which == 'D':
             for param_group in self.opt_D.param_groups:
                 param_group['lr'] = 0.0
             print("[LR-D] Paused Discriminator learning rate (waiting for Generator to plateau)")
+            print("[LOG] Discriminator is PAUSED.")
 
-    def maybe_resume_optimizer(self, which, lr):
+    def maybe_resume_optimizer(self, which, lr=None):
         """
-        Resume the optimizer for G or D to the given learning rate.
+        Resume the optimizer for G or D to the given learning rate (or to initial if None).
         """
         if which == 'G':
             for param_group in self.opt_G.param_groups:
+                if lr is None:
+                    lr = param_group.get('lr_init', 2e-4)
                 param_group['lr'] = lr
             print(f"[LR-G] Resumed Generator learning rate to {lr:.6f}")
+            print("[LOG] Generator is RESUMED.")
         elif which == 'D':
             for param_group in self.opt_D.param_groups:
+                if lr is None:
+                    lr = param_group.get('lr_init', 2e-4)
                 param_group['lr'] = lr
             print(f"[LR-D] Resumed Discriminator learning rate to {lr:.6f}")
+            print("[LOG] Discriminator is RESUMED.")
 
     def train(self, train_loader, epochs=float('inf'), sample_interval=1000):
         local_train_loader = train_loader
@@ -464,9 +439,23 @@ class GANTrainer:
         no_improve = 0
         prev_G_loss = None
         vram_retry = 0
-        max_epochs = EPOCHS
+        max_epochs = epochs
         self.epochs_at_res = 0  # Track epochs at current resolution
-        while True:
+        # --- Strict pause logic: always pause the worse network ---
+        D_MAX_LOSS = 10.0
+        G_MIN_LOSS = 0.05
+        G_paused = False
+        D_paused = False
+        G_paused_epochs = 0
+        D_paused_epochs = 0
+        while epoch < max_epochs:
+            # Set a new random seed for each epoch for better randomness
+            epoch_seed = int(time.time()) + epoch
+            random.seed(epoch_seed)
+            torch.manual_seed(epoch_seed)
+            np.random.seed(epoch_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(epoch_seed)
             try:
                 D_losses = []
                 G_losses = []
@@ -482,185 +471,71 @@ class GANTrainer:
                     real = real.to(self.device)
                     batch_size = real.size(0)
                     noise = torch.randn(batch_size, self.z_dim, 1, 1, device=self.device)
-                    # Train Discriminator with optional mixed precision
-                    train_start = time.time()
-                    if use_amp:
-                        with torch.cuda.amp.autocast():
-                            fake = self.G(noise)
-                            D_real = self.D(real).view(-1)
-                            D_fake = self.D(fake.detach()).view(-1)
-                            loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
-                                    self.criterion(D_fake, torch.zeros_like(D_fake))
-                        self.scaler.scale(loss_D).backward()
-                        self.scaler.step(self.opt_D)
-                    else:
-                        fake = self.G(noise)
-                        D_real = self.D(real).view(-1)
-                        D_fake = self.D(fake.detach()).view(-1)
-                        loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
-                                self.criterion(D_fake, torch.zeros_like(D_fake))
+                    fake = self.G(noise)
+                    # --- Strict per-batch pause logic ---
+                    # Compute both losses, but only update the worse one
+                    self.opt_D.zero_grad()
+                    D_real = self.D(real).view(-1)
+                    D_fake = self.D(fake.detach()).view(-1)
+                    loss_D = self.criterion(D_real, torch.ones_like(D_real)) + \
+                            self.criterion(D_fake, torch.zeros_like(D_fake))
+                    self.opt_G.zero_grad()
+                    output = self.D(fake).view(-1)
+                    loss_G = self.criterion(output, torch.ones_like(output))
+                    # Decide which network to update (worse loss)
+                    if loss_D.item() > loss_G.item():
+                        # Update D only
                         loss_D.backward()
                         self.opt_D.step()
-                    # Train Generator with optional mixed precision
-                    self.opt_G.zero_grad()
-                    if use_amp:
-                        with torch.cuda.amp.autocast():
-                            output = self.D(fake).view(-1)
-                            loss_G = self.criterion(output, torch.ones_like(output))
-                        self.scaler.scale(loss_G).backward()
-                        self.scaler.step(self.opt_G)
-                        self.scaler.update()
+                        D_losses.append(loss_D.item())
+                        G_losses.append(float('nan'))  # Mark G as paused for this batch
+                        print("[PAUSE] Generator paused this batch.")
                     else:
-                        output = self.D(fake).view(-1)
-                        loss_G = self.criterion(output, torch.ones_like(output))
+                        # Update G only
                         loss_G.backward()
                         self.opt_G.step()
-                    D_losses.append(loss_D.item())
-                    G_losses.append(loss_G.item())
-                    pbar.set_postfix({"D_loss": loss_D.item(), "G_loss": loss_G.item()})
+                        G_losses.append(loss_G.item())
+                        D_losses.append(float('nan'))  # Mark D as paused for this batch
+                        print("[PAUSE] Discriminator paused this batch.")
+                    pbar.set_postfix({"D_loss": D_losses[-1] if not isinstance(D_losses[-1], float) or not D_losses[-1] != D_losses[-1] else 'N/A', "G_loss": G_losses[-1] if not isinstance(G_losses[-1], float) or not G_losses[-1] != G_losses[-1] else 'N/A'})
                     batch_end = time.time()
                     batch_times.append(batch_end - data_loaded)
                     batch_start = time.time()
-                avg_D_loss = sum(D_losses) / len(D_losses)
-                avg_G_loss = sum(G_losses) / len(G_losses)
+                # Compute average losses, ignoring NaNs
+                avg_D_loss = (sum([x for x in D_losses if not (isinstance(x, float) and x != x)]) / max(1, len([x for x in D_losses if not (isinstance(x, float) and x != x)]))) if any([not (isinstance(x, float) and x != x) for x in D_losses]) else float('nan')
+                avg_G_loss = (sum([x for x in G_losses if not (isinstance(x, float) and x != x)]) / max(1, len([x for x in G_losses if not (isinstance(x, float) and x != x)]))) if any([not (isinstance(x, float) and x != x) for x in G_losses]) else float('nan')
                 epoch_end = time.time()
-                print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss:.4f} | G_loss: {avg_G_loss:.4f} | Quality: {self.img_size}x{self.img_size}")
+                print(f"[Epoch {epoch+1}] D_loss: {avg_D_loss if not isinstance(avg_D_loss, float) or not avg_D_loss != avg_D_loss else 'N/A'} | G_loss: {avg_G_loss if not isinstance(avg_G_loss, float) or not avg_G_loss != avg_G_loss else 'N/A'} | Quality: {self.img_size}x{self.img_size}")
                 print(f"[TIMING] Epoch {epoch+1}: Total {epoch_end-epoch_start:.2f}s | Avg data load {sum(data_times)/len(data_times):.2f}s | Avg train {sum(batch_times)/len(batch_times):.2f}s per batch")
-                # Step learning rate schedulers
-                prev_lr_G = self.opt_G.param_groups[0]['lr']
-                prev_lr_D = self.opt_D.param_groups[0]['lr']
-
-                # --- Concise LR logging with patience counters ---
-                # Remove scheduler-based patience logic, just use plateau detection for upscaling and pausing
-                if not hasattr(self, '_lr_patience_G'):
-                    self._lr_patience_G = 0
-                    self._lr_last_metric_G = avg_G_loss
-                if not hasattr(self, '_lr_patience_D'):
-                    self._lr_patience_D = 0
-                    self._lr_last_metric_D = avg_D_loss
-
-                # Generator patience logic
-                if avg_G_loss < getattr(self, '_lr_last_metric_G', float('inf')):
-                    self._lr_patience_G = 0
-                else:
-                    self._lr_patience_G += 1
-                self._lr_last_metric_G = avg_G_loss
-
-                # Discriminator patience logic
-                if avg_D_loss < getattr(self, '_lr_last_metric_D', float('inf')):
-                    self._lr_patience_D = 0
-                else:
-                    self._lr_patience_D += 1
-                self._lr_last_metric_D = avg_D_loss
-
-                patience_G = 100  # Set patience to 50
-                patience_D = 100
-                print(f"[LR-G] G_loss={avg_G_loss:.4f} | patience={self._lr_patience_G}/{patience_G}")
-                print(f"[LR-D] D_loss={avg_D_loss:.4f} | patience={self._lr_patience_D}/{patience_D}")
-
-                # Remove all scheduler-based LR change logic and variables
-                # Only print current fixed learning rates
                 print(f"[LR] G: {self.opt_G.param_groups[0]['lr']:.6f} | D: {self.opt_D.param_groups[0]['lr']:.6f}")
-
-                reset_counters = False
-                print(f"[LR] No LR change (waiting for plateau)")
-                if reset_counters:
-                    self._lr_patience_G = 0
-                    self._lr_patience_D = 0
-
-                # Overfitting/no-improvement heuristic (for collapse detection only)
-                if prev_G_loss is not None and avg_G_loss >= prev_G_loss and avg_D_loss >= self._lr_last_metric_D:
-                    no_improve += 1
-                    print(f"[No improvement] {no_improve}/20 epochs with no G or D improvement at {self.img_size}x{self.img_size}.")
-                else:
-                    no_improve = 0
-                prev_G_loss = avg_G_loss
-                # If no improvement in both for a long time at max res, reset models (collapse recovery)
-                if no_improve >= 20 and self.img_size == RESOLUTIONS[MAX_RES_INDEX]:
-                    print(f"[RECOVERY] No improvement in G and D for 20 epochs at max resolution. Resetting models to recover from collapse.")
-                    self.G = Generator(z_dim=self.z_dim, img_channels=3, img_size=self.img_size).to(self.device)
-                    self.D = Discriminator(img_channels=3, img_size=self.img_size).to(self.device)
-                    self.opt_G = optim.Adam(self.G.parameters(), lr=self.opt_G.param_groups[0]['lr'], betas=(0.5, 0.999))
-                    self.opt_D = optim.Adam(self.D.parameters(), lr=self.opt_D.param_groups[0]['lr'], betas=(0.5, 0.999))
-                    self.fixed_noise = torch.randn(16, self.z_dim, 1, 1, device=self.device)
-                    no_improve = 0
-                    print(f"[RECOVERY] Models reset at {self.img_size}x{self.img_size}.")
-                # --- Progressive growing logic ---
-                self.epochs_at_res += 1  # Increment epoch counter for current resolution
-                min_epochs = MIN_EPOCHS_PER_RES.get(self.img_size, 0)
-                # If only one has plateaued, pause the other
-                if self._lr_patience_G >= patience_G and self._lr_patience_D < patience_D:
-                    self.maybe_pause_optimizer('G')
-                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
-                    print(f"[SYNC] Generator plateaued, pausing G until Discriminator catches up.")
-                elif self._lr_patience_D >= patience_D and self._lr_patience_G < patience_G:
-                    self.maybe_pause_optimizer('D')
-                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
-                    print(f"[SYNC] Discriminator plateaued, pausing D until Generator catches up.")
-                elif self._lr_patience_G >= patience_G and self._lr_patience_D >= patience_D and self.epochs_at_res >= min_epochs:
-                    # Both plateaued and minimum epochs reached: resume both, then save full model and image for this resolution, then upscale
-                    self.maybe_resume_optimizer('G', self.opt_G.param_groups[0]['lr'])
-                    self.maybe_resume_optimizer('D', self.opt_D.param_groups[0]['lr'])
-                    # Save a full model labeled as 'fully trained' for this resolution
-                    fully_trained_path = os.path.join(DATA_DIR, f'gan_fully_trained_{self.img_size}x{self.img_size}.pth')
-                    torch.save({
-                        'G': self.G.state_dict(),
-                        'D': self.D.state_dict(),
-                        'opt_G': self.opt_G.state_dict(),
-                        'opt_D': self.opt_D.state_dict(),
-                        'epoch': epoch,
-                        'img_size': self.img_size,
-                        'resolution_history': self.resolution_history
-                    }, fully_trained_path)
-                    print(f"[FULL MODEL] Saved fully trained model for {self.img_size}x{self.img_size} to {fully_trained_path}")
-                    # Save a sample image for this resolution
-                    self.G.eval()
-                    with torch.no_grad():
-                        fake = self.G(self.fixed_noise[:1]).detach().cpu()
-                        img_path = os.path.join(SAMPLE_DIR, f'fully_trained_sample_{self.img_size}x{self.img_size}.png')
-                        save_image(fake, img_path, normalize=True)
-                        print(f"[FULL MODEL] Saved fully trained sample image for {self.img_size}x{self.img_size} to {img_path}")
-                    self.G.train()
-                    if self.img_size < RESOLUTIONS[MAX_RES_INDEX]:
-                        print(f"[PROGRESSIVE] Both G and D plateaued for {patience_G} (G) and {patience_D} (D) epochs and minimum {min_epochs} epochs reached. Upscaling...")
-                        prev_G = self.G
-                        prev_D = self.D
-                        self.grow_resolution(prev_G=prev_G, prev_D=prev_D)
-                        # Update DataLoader and transform for new resolution
-                        new_transform = get_transform(self.img_size)
-                        local_train_loader.dataset.transform = new_transform
-                        self._lr_patience_G = 0
-                        self._lr_patience_D = 0
-                        self.epochs_at_res = 0  # Reset epoch counter for new resolution
-                        print(f"[PROGRESSIVE] DataLoader and models updated for {self.img_size}x{self.img_size}.")
-                        continue  # Restart epoch at new resolution
-                    else:
-                        print(f"[EARLY STOP] Both G and D plateaued at max quality {self.img_size}x{self.img_size} and minimum {min_epochs} epochs reached. Stopping to avoid model collapse.")
-                        break
-                else:
-                    # Neither has plateaued: resume both if needed
-                    self.maybe_resume_optimizer('G', self.scheduler_G.optimizer.defaults['lr'])
-                    self.maybe_resume_optimizer('D', self.scheduler_D.optimizer.defaults['lr'])
+                # Save sample and checkpoint at intervals
                 if (epoch + 1) % self.sample_interval == 0 or epoch == 0:
                     print(f"[Epoch {epoch+1}] Saving sample and checkpoint...")
                     self.generate_sample(epoch+1)
                     self.save_checkpoint(epoch)
-                    
                     # Also update the manual sample image (now on the same schedule as checkpoints)
                     self.G.eval()
                     with torch.no_grad():
                         fake = self.G(self.fixed_noise[:1]).detach().cpu()
                         save_image(fake, os.path.join(SAMPLE_DIR, 'sample_epochmanual.png'), normalize=True)
                     self.G.train()
-                
                 # Create full model file every git_push_interval epochs only
                 if (epoch + 1) % self.git_push_interval == 0:
                     self.save_full_model(epoch)
+                # Save grid image with epoch in name every 1000 epochs
+                if (epoch + 1) % 1000 == 0:
+                    try:
+                        self.G.eval()
+                        with torch.no_grad():
+                            fake_grid = self.G(self.fixed_noise).detach().cpu()
+                            grid_path = os.path.join(SAMPLE_DIR, f'sample_grid_epoch{epoch+1}.png')
+                            save_image(fake_grid, grid_path, normalize=True, nrow=4, padding=2)
+                            print(f"[SAMPLE] Saved grid image: {grid_path}")
+                        self.G.train()
+                    except Exception as e:
+                        print(f"[ERROR] Failed to save grid image for epoch {epoch+1}: {e}")
                 epoch += 1
                 vram_retry = 0  # Reset VRAM retry counter after successful epoch
-                if epoch >= max_epochs:
-                    print(f"[INFO] Reached max epochs ({max_epochs}). Stopping training.")
-                    break
             except RuntimeError as e:
                 if 'CUDA out of memory' in str(e):
                     print(f"[VRAM] CUDA out of memory detected. Attempting VRAM fallback (attempt {vram_retry+1}/10)...")
@@ -693,32 +568,69 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=4, help='Number of worker processes for DataLoader (default: 4)')
     parser.add_argument('--preload', action='store_true', help='Preload all images into RAM for faster training (requires enough RAM)')
     parser.add_argument('--cache_tensors', action='store_true', help='Cache all transformed tensors in RAM for fastest data loading (no random augmentations)')
+    # Prompt for resolution and epochs if training
     args = parser.parse_args()
 
     print(f"Using device: {DEVICE}")
 
-    # Start at lowest resolution
-    initial_res = RESOLUTIONS[START_RES_INDEX]
-    transform = get_transform(initial_res)
-    train_ds = AxolotlDataset(TRAIN_DIR, transform, preload=args.preload, cache_tensors=args.cache_tensors)
-    pin_memory = DEVICE.type == 'cuda'
-    persistent_workers = args.num_workers > 0
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        drop_last=True,
-        num_workers=args.num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers
-    )
-    trainer = GANTrainer(img_size=initial_res, z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
+    if args.command == 'train':
+        print("Available resolutions:", RESOLUTIONS)
+        try:
+            res = int(input(f"Enter desired training resolution from {RESOLUTIONS}: "))
+            if res not in RESOLUTIONS:
+                raise ValueError()
+        except Exception:
+            print(f"Invalid resolution. Defaulting to {RESOLUTIONS[0]}.")
+            res = RESOLUTIONS[0]
+        try:
+            epochs = int(input("Enter number of epochs to run (minimum 1): "))
+            if epochs < 1:
+                raise ValueError()
+        except Exception:
+            print("Invalid epoch count. Defaulting to 200.")
+            epochs = 200
+        transform = get_transform(res)
+        train_ds = AxolotlDataset(TRAIN_DIR, transform, preload=args.preload, cache_tensors=args.cache_tensors)
+        pin_memory = DEVICE.type == 'cuda'
+        persistent_workers = args.num_workers > 0
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=BATCH_SIZE,
+            shuffle=True,
+            drop_last=True,
+            num_workers=args.num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
 
-    if args.command == 'sample':
+        # --- Progressive upscaling and weight transfer logic ---
+        res_index = RESOLUTIONS.index(res)
+        checkpoint_loaded = False
+        for lower_res in reversed(RESOLUTIONS[:res_index]):
+            lower_ckpt = os.path.join(DATA_DIR, f'gan_checkpoint_{lower_res}.pth')
+            if os.path.exists(lower_ckpt):
+                print(f"[UPSCALE] Found lower-res checkpoint: {lower_ckpt}")
+                # Load lower-res model
+                lower_G = Generator(z_dim=Z_DIM, img_channels=3, img_size=lower_res).to(DEVICE)
+                lower_D = Discriminator(img_channels=3, img_size=lower_res).to(DEVICE)
+                ckpt = torch.load(lower_ckpt, map_location=DEVICE)
+                lower_G.load_state_dict(ckpt['G'])
+                lower_D.load_state_dict(ckpt['D'])
+                # Init new model at target res
+                trainer = GANTrainer(img_size=res, z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
+                # Transfer weights
+                print(f"[UPSCALE] Transferring weights from {lower_res} to {res}...")
+                transfer_gan_weights(lower_G, trainer.G)
+                transfer_gan_weights(lower_D, trainer.D)
+                checkpoint_loaded = True
+                break
+        if not checkpoint_loaded:
+            trainer = GANTrainer(img_size=res, z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
+        trainer.train(train_loader, epochs=epochs, sample_interval=SAMPLE_INTERVAL)
+    elif args.command == 'sample':
         print("Generating a full image sample using the current generator...")
+        trainer = GANTrainer(img_size=RESOLUTIONS[0], z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
         trainer.load_checkpoint()
-        
-        # Make multiple attempts to generate samples with increasing VRAM optimization if needed
         try:
             trainer.generate_sample('manual')
             print(f"Sample saved to {os.path.join(SAMPLE_DIR, 'sample_epochmanual.png')}")
@@ -740,16 +652,6 @@ if __name__ == '__main__':
             else:
                 print(f"[ERROR] Failed to generate sample: {e}")
     elif args.command == 'save_full_model':
+        trainer = GANTrainer(img_size=RESOLUTIONS[0], z_dim=Z_DIM, lr=LEARNING_RATE, batch_size=BATCH_SIZE, device=DEVICE)
         trainer.load_checkpoint()
         trainer.save_full_model(trainer.start_epoch, manual=True)
-    else:
-        trainer.train(train_loader, epochs=EPOCHS, sample_interval=SAMPLE_INTERVAL)
-
-# ---
-# How self-adjusting learning rate works:
-# The ReduceLROnPlateau scheduler monitors the average loss for each network (G and D).
-# If the loss does not improve for 'patience' epochs (here, 10), the learning rate is reduced by 'factor' (here, 0.5).
-# This helps the optimizer escape plateaus and can stabilize GAN training, especially if the loss gets stuck or diverges.
-# The minimum learning rate is set to 1e-6 to avoid going too low.
-# You will see log messages whenever the learning rate is reduced.
-# ---

@@ -520,8 +520,8 @@ class GANTrainer:
                     loss_G_total = loss_G + diversity_lambda * diversity_loss
 
                     # --- Intra-batch neighbor diversity penalty (stronger for too-similar neighbors) ---
-                    neighbor_penalty_lambda = 0.2  # You can also increase this value for more effect
-                    neighbor_count = 2
+                    neighbor_penalty_lambda = 0.1  # You can also increase this value for more effect
+                    neighbor_count = 1
                     neighbor_penalty = 0.0
                     for i in range(batch_size):
                         main_z = noise[i:i+1]
